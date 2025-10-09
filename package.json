@@ -1,0 +1,32 @@
+{
+  "name": "email-agent",
+  "version": "1.0.0",
+  "description": "Claude Agent SDK project",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emlama/email-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/emlama/email-agent/issues"
+  },
+  "homepage": "https://github.com/emlama/email-agent#readme",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
