@@ -11,6 +11,10 @@ dist/
 .env
 .env.local
 
+# Gmail credentials and tokens (NEVER commit these)
+gmail-credentials.json
+gmail-tokens.json
+
 # IDE
 .vscode/
 .idea/

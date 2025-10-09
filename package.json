@@ -22,7 +22,10 @@
   },
   "homepage": "https://github.com/emlama/email-agent#readme",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.13"
+    "@anthropic-ai/claude-agent-sdk": "^0.1.13",
+    "google-auth-library": "^10.4.0",
+    "googleapis": "^162.0.0",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/node": "^24.7.1",
