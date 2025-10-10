@@ -1,5 +1,7 @@
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { gmailTools } from './gmail-tools';
+import { EmailWorkflowManager } from './email-workflow';
+import { EmailClassifier } from './email-classifier';
 import * as readline from 'readline';
 
 /**
@@ -52,10 +54,36 @@ async function main() {
 
       console.log('\n🤔 Processing your request...\n');
 
-      const result = await query({
-        prompt: `You are a helpful email management assistant. The user said: "${userInput}"
+      // Check if user wants to run email triage workflow
+      if (userInput.toLowerCase().includes('triage') || userInput.toLowerCase().includes('classify') || userInput.toLowerCase().includes('organize inbox')) {
+        console.log('🔄 Starting intelligent email triage workflow...\n');
 
-Please help them with their email-related tasks. You have access to Gmail tools for:
+        // Initialize workflow manager
+        const workflowManager = new EmailWorkflowManager(process.env.ANTHROPIC_API_KEY!, rl);
+
+        // For demo purposes, we'll need to get emails first
+        console.log('📧 To run email triage, I need to fetch your recent emails first.');
+        console.log('This will use the Gmail tools to get your inbox data.\n');
+
+        const confirm = await askQuestion('Proceed with email triage? (y/n): ');
+        if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+          console.log('🚀 Email triage workflow will be implemented here...');
+          console.log('💡 Integration with Gmail tools for fetching emails is needed.');
+          console.log('📝 This would fetch recent emails and run the classification workflow.');
+        } else {
+          console.log('❌ Email triage cancelled.');
+        }
+        continue;
+      }
+
+      const result = await query({
+        prompt: `You are an advanced personal email management assistant with intelligent classification capabilities.
+
+The user said: "${userInput}"
+
+You can help with:
+
+🔧 **Gmail Operations:**
 - Initializing Gmail connection (init_gmail)
 - Authenticating with Gmail (authenticate_gmail)
 - Listing emails (list_emails)
@@ -64,8 +92,24 @@ Please help them with their email-related tasks. You have access to Gmail tools 
 - Managing emails - archive, delete, mark as read/unread (manage_email)
 - Listing Gmail labels (list_labels)
 
+🧠 **Intelligent Email Triage:**
+- Use "triage my inbox" or "organize my inbox" to start the smart classification workflow
+- Automatically categorizes emails by priority and type
+- Provides step-by-step guidance for important emails
+- Creates detailed digests of informational content
+- Identifies junk email for cleanup
+- Reduces email anxiety with supportive guidance
+
+🎯 **Email Classification Features:**
+- Urgent actions (with anxiety support and step-by-step guidance)
+- Personal communications (with response suggestions)
+- Informational digests (preserving all key details)
+- Event tracking and calendar integration
+- Transaction logging
+- Automated junk identification
+
 If this is the first time using the agent, guide them through the setup process.
-Be friendly, helpful, and provide clear instructions.`,
+Be friendly, helpful, and highlight the intelligent triage capabilities.`,
         options: {
           mcpServers: {
             'gmail-tools': createSdkMcpServer({
