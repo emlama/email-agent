@@ -114,6 +114,39 @@ function makeHttpRequest(url: string): Promise<{ success: boolean; statusCode?: 
   });
 }
 
+// Helper function to create a raw RFC 2822 email message
+function createRawEmail(params: {
+  to: string;
+  from: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string;
+  references?: string;
+  threadId?: string;
+}): string {
+  const lines = [
+    `To: ${params.to}`,
+    `From: ${params.from}`,
+    `Subject: ${params.subject}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'MIME-Version: 1.0'
+  ];
+
+  if (params.inReplyTo) {
+    lines.push(`In-Reply-To: ${params.inReplyTo}`);
+  }
+
+  if (params.references) {
+    lines.push(`References: ${params.references}`);
+  }
+
+  lines.push('');
+  lines.push(params.body);
+
+  const email = lines.join('\r\n');
+  return Buffer.from(email).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 // Helper function to convert time ranges to Gmail query syntax
 function buildGmailQuery(params: {
   query?: string;
@@ -447,7 +480,97 @@ function createGmailTools(gmailService: GmailService) {
     }
   });
 
-  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool];
+  const draftReplyTool = new DynamicStructuredTool({
+    name: 'draft_reply',
+    description: 'Create a draft reply to an email. The draft will be saved in Gmail and can be reviewed/edited before sending.',
+    schema: z.object({
+      emailId: z.string().describe('Gmail message ID of the email to reply to'),
+      replyBody: z.string().describe('The content of the reply message')
+    }),
+    func: async ({ emailId, replyBody }: any): Promise<string> => {
+      await gmailService.refreshTokenIfNeeded();
+      const gmail = gmailService.getGmailApi();
+
+      try {
+        // Get the original email with full headers
+        const response = await gmail.users.messages.get({
+          userId: 'me',
+          id: emailId,
+          format: 'full'
+        });
+
+        const headers = response.data.payload?.headers || [];
+        const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+        const from = getHeader('From');
+        const to = getHeader('To');
+        const subject = getHeader('Subject');
+        const messageId = getHeader('Message-ID');
+        const references = getHeader('References');
+        const threadId = response.data.threadId;
+
+        // Determine reply-to address (prefer Reply-To header if present)
+        const replyTo = getHeader('Reply-To') || from;
+
+        // Prepare subject with "Re: " prefix if not already present
+        const replySubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`;
+
+        // Build References header for threading
+        let replyReferences = messageId;
+        if (references) {
+          replyReferences = `${references} ${messageId}`;
+        }
+
+        // Get user's email address
+        const profile = await gmail.users.getProfile({ userId: 'me' });
+        const userEmail = profile.data.emailAddress || '';
+
+        // Create the raw email message
+        const rawMessage = createRawEmail({
+          to: replyTo,
+          from: userEmail,
+          subject: replySubject,
+          body: replyBody,
+          inReplyTo: messageId,
+          references: replyReferences,
+          threadId: threadId || undefined
+        });
+
+        // Create the draft
+        const draftResponse = await gmail.users.drafts.create({
+          userId: 'me',
+          requestBody: {
+            message: {
+              raw: rawMessage,
+              threadId: threadId || undefined
+            }
+          }
+        });
+
+        const draftId = draftResponse.data.id;
+        console.log(`✉️  Created draft reply with ID: ${draftId}`);
+
+        return JSON.stringify({
+          success: true,
+          draftId: draftId,
+          to: replyTo,
+          subject: replySubject,
+          threadId: threadId,
+          message: `Draft reply created successfully. You can review and send it from Gmail.`,
+          previewBody: replyBody.slice(0, 150) + (replyBody.length > 150 ? '...' : '')
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error),
+          message: 'Failed to create draft reply'
+        }, null, 2);
+      }
+    }
+  });
+
+  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool, draftReplyTool];
 }
 
 async function main() {
@@ -514,6 +637,13 @@ async function main() {
   - Works with emails that have standard RFC-compliant unsubscribe links
   - Use this for emails in the "Unsubscribe" category
   - Note: Not all emails have automated unsubscribe links; some may require manual action
+
+- **draft_reply**: Create a draft reply to an email
+  - Automatically handles threading (In-Reply-To, References headers) to keep conversations organized
+  - Prefixes subject with "Re: " if not already present
+  - Saves as draft in Gmail for review before sending
+  - Use this for Action Required emails that need thoughtful responses
+  - Emily can review, edit, and send the draft from Gmail
 
 📋 **Email Classification System:**
 When asked to classify or organize emails, use these categories:
@@ -630,9 +760,15 @@ Present each important email individually with:
 
 **Options:**
 1. Read full email
-2. Archive
-3. Skip for now
-4. Next email
+2. Draft reply (if response needed)
+3. Archive
+4. Skip for now
+5. Next email
+
+When drafting replies:
+- Offer to create a draft for Action Required emails that need responses
+- Suggest thoughtful reply content based on the email context
+- Always save as draft so Emily can review before sending
 
 **IMPORTANT GUIDELINES:**
 1. **ALWAYS start with Action Required emails** - never skip to other categories first
