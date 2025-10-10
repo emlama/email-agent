@@ -1,0 +1,3 @@
+# Memory files directory
+# This directory contains AI memory files with personal information
+# Memory files are automatically excluded from Git commits via .gitignore

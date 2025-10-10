@@ -220,6 +220,370 @@ function formatDate(date: Date): string {
   return `${year}/${month}/${day}`;
 }
 
+// Helper function to validate and sanitize memory file paths
+function validateMemoryPath(filePath: string): { valid: boolean; fullPath?: string; error?: string } {
+  const memoriesDir = path.join(process.cwd(), 'memories');
+
+  // Resolve the full path and normalize it
+  const fullPath = path.resolve(memoriesDir, filePath);
+
+  // Security: Ensure the path is within the memories directory (prevent path traversal)
+  if (!fullPath.startsWith(memoriesDir + path.sep) && fullPath !== memoriesDir) {
+    return { valid: false, error: 'Invalid path: must be within /memories directory' };
+  }
+
+  // Security: Prevent accessing hidden files or parent directories
+  const relativePath = path.relative(memoriesDir, fullPath);
+  if (relativePath.startsWith('..') || relativePath.includes(path.sep + '.')) {
+    return { valid: false, error: 'Invalid path: cannot access parent directories or hidden files' };
+  }
+
+  // Only allow .txt and .md files
+  const ext = path.extname(fullPath).toLowerCase();
+  if (ext !== '.txt' && ext !== '.md' && ext !== '') {
+    return { valid: false, error: 'Invalid file type: only .txt and .md files are allowed' };
+  }
+
+  return { valid: true, fullPath };
+}
+
+// Create memory tools for the Anthropic Memory Tool beta
+function createMemoryTools() {
+  const memoriesDir = path.join(process.cwd(), 'memories');
+  const MAX_FILE_SIZE = 100 * 1024; // 100KB limit per file
+
+  // Ensure memories directory exists
+  if (!fs.existsSync(memoriesDir)) {
+    fs.mkdirSync(memoriesDir, { recursive: true });
+  }
+
+  const viewTool = new DynamicStructuredTool({
+    name: 'view_memory',
+    description: 'View the contents of the memory directory or a specific memory file. Use this to recall information from previous conversations.',
+    schema: z.object({
+      path: z.string().optional().describe('Optional path to a specific file. If not provided, lists all files in /memories directory')
+    }),
+    func: async ({ path: filePath }: any): Promise<string> => {
+      try {
+        if (!filePath) {
+          // List all files in memories directory
+          const files = fs.readdirSync(memoriesDir)
+            .filter(f => !f.startsWith('.'))
+            .map(f => {
+              const stats = fs.statSync(path.join(memoriesDir, f));
+              return {
+                name: f,
+                size: stats.size,
+                modified: stats.mtime.toISOString()
+              };
+            });
+
+          return JSON.stringify({
+            success: true,
+            directory: '/memories',
+            files: files,
+            message: files.length === 0 ? 'Memory directory is empty' : `Found ${files.length} file(s)`
+          }, null, 2);
+        }
+
+        // View specific file
+        const validation = validateMemoryPath(filePath);
+        if (!validation.valid) {
+          return JSON.stringify({ success: false, error: validation.error }, null, 2);
+        }
+
+        if (!fs.existsSync(validation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File not found: ${filePath}`
+          }, null, 2);
+        }
+
+        const content = fs.readFileSync(validation.fullPath!, 'utf-8');
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          content: content
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  const createTool = new DynamicStructuredTool({
+    name: 'create_memory',
+    description: 'Create a new memory file with content. Use this to remember important information across conversations.',
+    schema: z.object({
+      path: z.string().describe('Path for the new file (e.g., "contacts.txt", "preferences.md")'),
+      content: z.string().describe('Content to write to the file')
+    }),
+    func: async ({ path: filePath, content }: any): Promise<string> => {
+      try {
+        const validation = validateMemoryPath(filePath);
+        if (!validation.valid) {
+          return JSON.stringify({ success: false, error: validation.error }, null, 2);
+        }
+
+        if (fs.existsSync(validation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File already exists: ${filePath}. Use str_replace or insert to modify existing files.`
+          }, null, 2);
+        }
+
+        if (content.length > MAX_FILE_SIZE) {
+          return JSON.stringify({
+            success: false,
+            error: `Content too large: maximum ${MAX_FILE_SIZE} bytes`
+          }, null, 2);
+        }
+
+        // Ensure parent directory exists
+        const dir = path.dirname(validation.fullPath!);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+
+        fs.writeFileSync(validation.fullPath!, content, 'utf-8');
+        console.log(`💾 Created memory file: ${filePath}`);
+
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          message: `Memory file created: ${filePath}`
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  const strReplaceTool = new DynamicStructuredTool({
+    name: 'str_replace_memory',
+    description: 'Replace a specific string in a memory file. Use this to update existing information.',
+    schema: z.object({
+      path: z.string().describe('Path to the file to modify'),
+      old_str: z.string().describe('String to search for'),
+      new_str: z.string().describe('String to replace it with')
+    }),
+    func: async ({ path: filePath, old_str, new_str }: any): Promise<string> => {
+      try {
+        const validation = validateMemoryPath(filePath);
+        if (!validation.valid) {
+          return JSON.stringify({ success: false, error: validation.error }, null, 2);
+        }
+
+        if (!fs.existsSync(validation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File not found: ${filePath}`
+          }, null, 2);
+        }
+
+        const content = fs.readFileSync(validation.fullPath!, 'utf-8');
+
+        if (!content.includes(old_str)) {
+          return JSON.stringify({
+            success: false,
+            error: `String not found in file: "${old_str}"`
+          }, null, 2);
+        }
+
+        const newContent = content.replace(old_str, new_str);
+
+        if (newContent.length > MAX_FILE_SIZE) {
+          return JSON.stringify({
+            success: false,
+            error: `Content too large after replacement: maximum ${MAX_FILE_SIZE} bytes`
+          }, null, 2);
+        }
+
+        fs.writeFileSync(validation.fullPath!, newContent, 'utf-8');
+        console.log(`✏️  Updated memory file: ${filePath}`);
+
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          message: `Memory file updated: ${filePath}`
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  const insertTool = new DynamicStructuredTool({
+    name: 'insert_memory',
+    description: 'Insert content at a specific line in a memory file.',
+    schema: z.object({
+      path: z.string().describe('Path to the file to modify'),
+      insert_line: z.number().describe('Line number to insert at (0-indexed)'),
+      content: z.string().describe('Content to insert')
+    }),
+    func: async ({ path: filePath, insert_line, content }: any): Promise<string> => {
+      try {
+        const validation = validateMemoryPath(filePath);
+        if (!validation.valid) {
+          return JSON.stringify({ success: false, error: validation.error }, null, 2);
+        }
+
+        if (!fs.existsSync(validation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File not found: ${filePath}`
+          }, null, 2);
+        }
+
+        const fileContent = fs.readFileSync(validation.fullPath!, 'utf-8');
+        const lines = fileContent.split('\n');
+
+        if (insert_line < 0 || insert_line > lines.length) {
+          return JSON.stringify({
+            success: false,
+            error: `Invalid line number: ${insert_line}. File has ${lines.length} lines.`
+          }, null, 2);
+        }
+
+        lines.splice(insert_line, 0, content);
+        const newContent = lines.join('\n');
+
+        if (newContent.length > MAX_FILE_SIZE) {
+          return JSON.stringify({
+            success: false,
+            error: `Content too large after insertion: maximum ${MAX_FILE_SIZE} bytes`
+          }, null, 2);
+        }
+
+        fs.writeFileSync(validation.fullPath!, newContent, 'utf-8');
+        console.log(`✏️  Inserted content in memory file: ${filePath}`);
+
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          message: `Content inserted at line ${insert_line} in ${filePath}`
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  const deleteTool = new DynamicStructuredTool({
+    name: 'delete_memory',
+    description: 'Delete a memory file. Use with caution - this cannot be undone.',
+    schema: z.object({
+      path: z.string().describe('Path to the file to delete')
+    }),
+    func: async ({ path: filePath }: any): Promise<string> => {
+      try {
+        const validation = validateMemoryPath(filePath);
+        if (!validation.valid) {
+          return JSON.stringify({ success: false, error: validation.error }, null, 2);
+        }
+
+        if (!fs.existsSync(validation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File not found: ${filePath}`
+          }, null, 2);
+        }
+
+        fs.unlinkSync(validation.fullPath!);
+        console.log(`🗑️  Deleted memory file: ${filePath}`);
+
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          message: `Memory file deleted: ${filePath}`
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  const renameTool = new DynamicStructuredTool({
+    name: 'rename_memory',
+    description: 'Rename or move a memory file.',
+    schema: z.object({
+      old_path: z.string().describe('Current path of the file'),
+      new_path: z.string().describe('New path for the file')
+    }),
+    func: async ({ old_path, new_path }: any): Promise<string> => {
+      try {
+        const oldValidation = validateMemoryPath(old_path);
+        if (!oldValidation.valid) {
+          return JSON.stringify({ success: false, error: `Old path: ${oldValidation.error}` }, null, 2);
+        }
+
+        const newValidation = validateMemoryPath(new_path);
+        if (!newValidation.valid) {
+          return JSON.stringify({ success: false, error: `New path: ${newValidation.error}` }, null, 2);
+        }
+
+        if (!fs.existsSync(oldValidation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `File not found: ${old_path}`
+          }, null, 2);
+        }
+
+        if (fs.existsSync(newValidation.fullPath!)) {
+          return JSON.stringify({
+            success: false,
+            error: `Destination already exists: ${new_path}`
+          }, null, 2);
+        }
+
+        // Ensure parent directory exists
+        const dir = path.dirname(newValidation.fullPath!);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+
+        fs.renameSync(oldValidation.fullPath!, newValidation.fullPath!);
+        console.log(`📝 Renamed memory file: ${old_path} → ${new_path}`);
+
+        return JSON.stringify({
+          success: true,
+          old_path: old_path,
+          new_path: new_path,
+          message: `Memory file renamed: ${old_path} → ${new_path}`
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  return [viewTool, createTool, strReplaceTool, insertTool, deleteTool, renameTool];
+}
+
 // Create Gmail tools using LangGraph's DynamicStructuredTool
 function createGmailTools(gmailService: GmailService) {
   const listEmailsTool = new DynamicStructuredTool({
@@ -595,13 +959,20 @@ async function main() {
   console.log('I can help you with email tasks.\n');
   console.log('💡 Commands: "quit" (exit)\n');
 
-  // Create LangGraph tools
-  const tools = createGmailTools(gmailService);
+  // Create LangGraph tools (Gmail + Memory)
+  const gmailTools = createGmailTools(gmailService);
+  const memoryTools = createMemoryTools();
+  const tools = [...gmailTools, ...memoryTools];
 
-  // Initialize Claude model
+  // Initialize Claude model with memory tool beta
   const model = new ChatAnthropic({
     model: 'claude-sonnet-4-5-20250929',
     apiKey: process.env.ANTHROPIC_API_KEY,
+    clientOptions: {
+      defaultHeaders: {
+        'anthropic-beta': 'context-management-2025-06-27'
+      }
+    }
   });
 
   // System prompt to guide the agent's behavior
@@ -619,6 +990,37 @@ async function main() {
    - Move quickly through informational content
 
 **Remember**: It's better to spend time on one important email than to archive 100 newsletters. Quality over speed for critical emails.
+
+💾 **MEMORY SYSTEM:**
+You have access to a persistent memory system that allows you to remember information across conversations:
+
+**Memory Operations:**
+- **view_memory**: View memory directory contents or read a specific memory file
+- **create_memory**: Create a new memory file (e.g., "contacts.txt", "preferences.md")
+- **str_replace_memory**: Update existing information by replacing strings
+- **insert_memory**: Insert content at a specific line
+- **delete_memory**: Delete a memory file
+- **rename_memory**: Rename or move a memory file
+
+**What to Remember:**
+- **Contacts**: Important people Emily emails with, their roles, context about relationships
+- **Preferences**: How Emily prefers to categorize certain types of emails, communication style preferences
+- **Job Search**: Recruiters contacted, companies applied to, interview dates, follow-up needed
+- **Events**: Recurring events Emily attends, venues, organizers
+- **Email Patterns**: Senders Emily always archives, newsletters to unsubscribe from
+- **Response Templates**: Common reply patterns or phrases Emily uses
+
+**Memory Best Practices:**
+1. **Check memory first**: At the start of each session, view memory directory to recall context
+2. **Update as you learn**: When Emily makes decisions or shares preferences, save them to memory
+3. **Organize by topic**: Use descriptive filenames like "job_search.md", "frequent_contacts.txt", "email_preferences.md"
+4. **Keep it current**: Update memory when situations change (e.g., job status, new contacts)
+5. **Focus on actionable info**: Remember things that help you categorize and respond to emails better
+
+**Example Memory Usage:**
+- When Emily says "always archive emails from this sender", save it to "email_preferences.md"
+- When drafting replies, check "response_style.txt" to match Emily's tone
+- Before suggesting which emails to prioritize, check "job_search.md" for current priorities
 
 🔧 **Available Gmail Operations:**
 - **list_emails**: Search and filter emails with flexible options

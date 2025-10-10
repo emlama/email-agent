@@ -15,6 +15,10 @@ dist/
 gmail-credentials.json
 gmail-tokens.json
 
+# Memory files (contain personal information, NEVER commit these)
+memories/
+!memories/.gitkeep
+
 # IDE
 .vscode/
 .idea/
