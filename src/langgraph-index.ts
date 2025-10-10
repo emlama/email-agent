@@ -7,6 +7,8 @@ import { GmailService } from './gmail-service';
 import * as readline from 'readline';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
+import * as http from 'http';
 import { HumanMessage } from '@langchain/core/messages';
 
 const rl = readline.createInterface({
@@ -73,6 +75,43 @@ async function initializeGmail(): Promise<GmailService | null> {
     console.log('Gmail features will be disabled.\n');
     return null;
   }
+}
+
+// Helper function to make HTTP GET requests
+function makeHttpRequest(url: string): Promise<{ success: boolean; statusCode?: number; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      const urlObj = new URL(url);
+      const protocol = urlObj.protocol === 'https:' ? https : http;
+
+      const req = protocol.get(url, (res) => {
+        resolve({
+          success: res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 400,
+          statusCode: res.statusCode
+        });
+      });
+
+      req.on('error', (error) => {
+        resolve({
+          success: false,
+          error: error.message
+        });
+      });
+
+      req.setTimeout(10000, () => {
+        req.destroy();
+        resolve({
+          success: false,
+          error: 'Request timeout'
+        });
+      });
+    } catch (error) {
+      resolve({
+        success: false,
+        error: String(error)
+      });
+    }
+  });
 }
 
 // Helper function to convert time ranges to Gmail query syntax
@@ -310,7 +349,105 @@ function createGmailTools(gmailService: GmailService) {
     }
   });
 
-  return [listEmailsTool, readEmailTool, archiveEmailTool];
+  const unsubscribeEmailTool = new DynamicStructuredTool({
+    name: 'unsubscribe_email',
+    description: 'Automatically unsubscribe from an email by parsing the List-Unsubscribe header and making the necessary HTTP request',
+    schema: z.object({
+      emailId: z.string().describe('Gmail message ID of the email to unsubscribe from')
+    }),
+    func: async ({ emailId }: any): Promise<string> => {
+      await gmailService.refreshTokenIfNeeded();
+      const gmail = gmailService.getGmailApi();
+
+      try {
+        // Get the email with full headers
+        const response = await gmail.users.messages.get({
+          userId: 'me',
+          id: emailId,
+          format: 'full'
+        });
+
+        const headers = response.data.payload?.headers || [];
+        const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+        const listUnsubscribe = getHeader('List-Unsubscribe');
+        const fromHeader = getHeader('From');
+
+        if (!listUnsubscribe) {
+          return JSON.stringify({
+            success: false,
+            error: 'No List-Unsubscribe header found in this email',
+            from: fromHeader,
+            message: 'This email does not have an automated unsubscribe link. You may need to manually unsubscribe.'
+          }, null, 2);
+        }
+
+        console.log(`📧 Found List-Unsubscribe header: ${listUnsubscribe}`);
+
+        // Parse List-Unsubscribe header - can contain multiple URLs in <> brackets
+        const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
+        if (!urlMatches) {
+          return JSON.stringify({
+            success: false,
+            error: 'Could not parse List-Unsubscribe header',
+            from: fromHeader,
+            listUnsubscribe: listUnsubscribe
+          }, null, 2);
+        }
+
+        // Extract URLs and filter for https URLs (prefer https over mailto)
+        const urls = urlMatches.map(match => match.slice(1, -1)); // Remove < and >
+        const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+
+        if (httpUrls.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'No HTTP unsubscribe URLs found (only mailto: links available)',
+            from: fromHeader,
+            availableUrls: urls,
+            message: 'This email only provides mailto: unsubscribe links, which cannot be automated.'
+          }, null, 2);
+        }
+
+        // Try each HTTP URL until one succeeds
+        const results = [];
+        for (const url of httpUrls) {
+          console.log(`🔗 Attempting unsubscribe via: ${url}`);
+          const result = await makeHttpRequest(url);
+          results.push({ url, ...result });
+
+          if (result.success) {
+            console.log(`✅ Successfully unsubscribed via ${url}`);
+            return JSON.stringify({
+              success: true,
+              from: fromHeader,
+              unsubscribeUrl: url,
+              statusCode: result.statusCode,
+              message: `Successfully unsubscribed from ${fromHeader}`
+            }, null, 2);
+          }
+        }
+
+        // If we get here, all attempts failed
+        return JSON.stringify({
+          success: false,
+          from: fromHeader,
+          error: 'All unsubscribe attempts failed',
+          attempts: results,
+          message: 'Could not automatically unsubscribe. You may need to manually visit the unsubscribe link in the email.'
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error),
+          message: 'Failed to process unsubscribe request'
+        }, null, 2);
+      }
+    }
+  });
+
+  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool];
 }
 
 async function main() {
@@ -371,6 +508,12 @@ async function main() {
 
 - **archive_email**: Archive one or more emails (removes from inbox, keeps in All Mail)
   - Can archive multiple emails at once by providing an array of email IDs
+
+- **unsubscribe_email**: Automatically unsubscribe from promotional/marketing emails
+  - Parses the List-Unsubscribe header and makes the HTTP request on your behalf
+  - Works with emails that have standard RFC-compliant unsubscribe links
+  - Use this for emails in the "Unsubscribe" category
+  - Note: Not all emails have automated unsubscribe links; some may require manual action
 
 📋 **Email Classification System:**
 When asked to classify or organize emails, use these categories:
