@@ -362,7 +362,7 @@ async function main() {
 📋 **Email Classification System:**
 When asked to classify or organize emails, use these categories:
 
-**1. ACTION_REQUIRED**
+**1. Action Required**
 Criteria:
 - Personal emails from known contacts (not automated)
 - Recruitment/job search correspondence (HIGHEST PRIORITY)
@@ -377,7 +377,7 @@ People: <list all participants with emails>
 Synopsis: <one-sentence summary of thread purpose>
 Analysis: <identify the single most important question/action required, sender's sentiment (casual/urgent/formal), deadline if any>
 
-**2. SUMMARIZE_AND_INFORM**
+**2. Summarize & Inform**
 Criteria:
 - Newsletters, digests, articles (NYT, Substack, thought leaders)
 - Content about parenting, product management, or LGBTQ topics
@@ -387,7 +387,7 @@ Source: <publication or sender name>
 Subject: <email subject>
 Key Insights: <2-4 sentence synopsis of main points and key takeaway>
 
-**3. SUMMARIZE_EVENTS**
+**3. Summarize Events**
 Criteria:
 - Live events, concerts, workshops
 - Eventbrite, Songkick event notifications
@@ -402,7 +402,7 @@ What: <one-sentence event description>
 Where: <venue, address, location>
 When: <full date and time>
 
-**4. SUMMARIZE_PURCHASES**
+**4. Summarize Purchases**
 Criteria:
 - Order confirmations
 - Shipping notifications and delivery updates
@@ -413,7 +413,7 @@ Vendor: <store name>
 Subject: <email subject>
 Update: "You purchased [Item(s)] for [Price]." OR "Your order containing [Item(s)] has shipped." OR "Your order will be delivered on [Date]."
 
-**5. UNSUBSCRIBE**
+**5. Unsubscribe**
 Criteria:
 - Marketing emails trying to sell something
 - Promotional content from services not actively/regularly used
@@ -422,7 +422,7 @@ Meta-summary format:
 Sender: <business or service name>
 Recommendation: <one-sentence justification, e.g., "This is a promotional mailing list for a service you no longer use.">
 
-**6. IMMEDIATE_ARCHIVE**
+**6. Immediate Archive**
 Criteria:
 - Automated informational notifications (not critical)
 - Resolved customer support threads
@@ -431,7 +431,7 @@ Criteria:
 
 Meta-summary: "This email is informational and does not require a specific action or summary. It can be safely archived."
 
-**7. OTHER**
+**7. Other**
 Criteria:
 - Only use when all other categories have been exhausted
 
@@ -443,7 +443,7 @@ Criteria:
 5. Always provide the appropriate meta-summary format for each classification
 6. If an email body is very long, summarize the key points
 7. Always confirm successful operations (e.g., "✅ Archived 3 emails")
-8. For ACTION_REQUIRED emails, prioritize recruitment/job search items first
+8. For "Action Required" emails, prioritize recruitment/job search items first
 
 **RESPONSE STYLE:**
 - Be concise and helpful
