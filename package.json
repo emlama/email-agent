@@ -1,12 +1,11 @@
 {
   "name": "email-agent",
   "version": "1.0.0",
-  "description": "Claude Agent SDK project",
-  "main": "dist/index.js",
+  "description": "Gmail email management agent using LangGraph and Claude",
+  "main": "dist/langgraph-index.js",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsx src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx src/langgraph-index.ts",
+    "start": "tsx src/langgraph-index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -22,10 +21,13 @@
   },
   "homepage": "https://github.com/emlama/email-agent#readme",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.13",
+    "@langchain/anthropic": "^0.3.30",
+    "@langchain/core": "^0.3.78",
+    "@langchain/langgraph": "^0.4.9",
+    "dotenv": "^17.2.3",
     "google-auth-library": "^10.4.0",
     "googleapis": "^162.0.0",
-    "zod": "^4.1.12"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^24.7.1",

@@ -1,4 +1,4 @@
-import { google } from 'googleapis';
+import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
@@ -19,7 +19,7 @@ export interface GmailTokens {
 
 export class GmailService {
   private oauth2Client: OAuth2Client;
-  private gmail: any;
+  private gmail: gmail_v1.Gmail | null = null;
 
   constructor(credentials: GmailCredentials) {
     this.oauth2Client = new google.auth.OAuth2(
@@ -95,7 +95,7 @@ export class GmailService {
   /**
    * Get Gmail API instance
    */
-  getGmailApi(): any {
+  getGmailApi(): gmail_v1.Gmail {
     if (!this.gmail) {
       throw new Error('Gmail service not authenticated. Please authenticate first.');
     }

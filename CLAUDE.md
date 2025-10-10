@@ -9,32 +9,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm install                    # Install dependencies
 cp .env.example .env          # Create environment file
 # Add ANTHROPIC_API_KEY to .env
+# Add Gmail OAuth credentials as gmail-credentials.json
 ```
 
 ### Running the Agent
 ```bash
-npm run dev                   # Development mode with tsx (auto-reload)
-npm run build                 # Compile TypeScript to dist/
-npm start                     # Run compiled JavaScript
+npm run dev                   # Development mode with tsx
+npm start                     # Same as dev (uses tsx)
 ```
 
 ## Architecture
 
-This is a Claude Agent SDK TypeScript project using CommonJS modules.
+This is a Gmail email management agent built with **LangGraph** and **Claude (Anthropic)**.
 
-### Agent SDK Pattern
-- **Tools**: Created with `tool()` function from `@anthropic-ai/claude-agent-sdk`
-  - Define `name`, `description`, `parameters` (with types and descriptions), and `execute` function
-  - Parameters are strongly typed and validated by the SDK
-- **Queries**: Use `query()` function with `prompt`, `tools` array, and `options` (including `apiKey`)
-- **Environment**: API key loaded from `ANTHROPIC_API_KEY` environment variable
+### Technology Stack
+- **LangGraph**: Orchestration framework for building controllable AI agents
+- **Claude Sonnet 4.5**: Anthropic's latest model for reasoning and tool use
+- **Gmail API**: OAuth2 authentication and email operations
+- **TypeScript**: Type-safe development with CommonJS modules
 
-### TypeScript Configuration
-- Target: ES2022 with CommonJS modules
-- Strict mode enabled
-- Source in `src/`, compiled output in `dist/`
-- Main entry point: `src/index.ts`
+### Agent Pattern (ReAct)
+The agent uses LangGraph's `createReactAgent` which implements the ReAct (Reasoning + Acting) pattern:
+1. **Reason**: Claude analyzes the user's request
+2. **Act**: Calls Gmail tools (list, read, archive emails)
+3. **Observe**: Receives tool results
+4. **Repeat**: Continues until task is complete
+
+LangGraph automatically handles:
+- Conversation history and memory
+- Multi-turn tool calling
+- State management
+- Error handling and retries
+
+### Gmail Tools
+Tools are defined using LangGraph's `DynamicStructuredTool`:
+- **list_emails**: Search emails with filters (time range, sender, subject, etc.)
+- **read_email**: Read full email content by ID
+- **archive_email**: Archive emails (remove from inbox)
+
+### Project Structure
+- `src/langgraph-index.ts`: Main entry point with LangGraph agent
+- `src/gmail-service.ts`: Gmail OAuth2 and API wrapper
+- `gmail-credentials.json`: OAuth2 credentials from Google Cloud Console
+- `gmail-tokens.json`: Cached OAuth2 tokens (auto-generated)
 
 ## Reference Documentation
-- [Claude Agent SDK Documentation](https://docs.claude.com/en/api/agent-sdk/typescript)
-- [Anthropic API Documentation](https://docs.anthropic.com/)
+- [LangGraph TypeScript](https://langchain-ai.github.io/langgraphjs/)
+- [LangChain Anthropic Integration](https://js.langchain.com/docs/integrations/platforms/anthropic/)
+- [Gmail API Documentation](https://developers.google.com/gmail/api)
