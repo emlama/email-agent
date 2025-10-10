@@ -1,5 +1,26 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { EMAIL_CLASSIFIER_PROMPT, EmailClassificationResult } from './email-classifier-prompt';
+
+/**
+ * Helper function to execute a query and extract the result string
+ */
+async function executeQuery(params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }): Promise<string> {
+  let finalResult = '';
+
+  for await (const msg of query(params)) {
+    if (msg.type === 'result') {
+      if (msg.subtype === 'success') {
+        finalResult = msg.result;
+      } else {
+        // Handle error cases
+        throw new Error(`Query failed: ${msg.subtype}`);
+      }
+    }
+  }
+
+  return finalResult;
+}
 
 export interface EmailData {
   subject: string;
@@ -36,10 +57,9 @@ ${emailData.textAsHtml}
 Please analyze this email and return the classification result as a clean JSON object with no additional formatting or explanation.`;
 
     try {
-      const result = await query({
+      const result = await executeQuery({
         prompt: classificationPrompt,
         options: {
-          apiKey: this.apiKey,
           model: 'claude-3-5-sonnet-20241022'
         }
       });
