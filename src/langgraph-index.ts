@@ -934,7 +934,107 @@ function createGmailTools(gmailService: GmailService) {
     }
   });
 
-  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool, draftReplyTool];
+  const unsubscribeAndArchiveTool = new DynamicStructuredTool({
+    name: 'unsubscribe_and_archive',
+    description: 'Batch operation: attempt to unsubscribe from multiple emails and then archive them all. Perfect for sweeping away junk newsletters. Optimistic - continues even if unsubscribe fails.',
+    schema: z.object({
+      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to unsubscribe and archive')
+    }),
+    func: async ({ emailIds }: any): Promise<string> => {
+      await gmailService.refreshTokenIfNeeded();
+      const gmail = gmailService.getGmailApi();
+
+      const results = {
+        total: emailIds.length,
+        unsubscribed: [] as string[],
+        unsubscribeFailed: [] as string[],
+        archived: [] as string[],
+        archiveFailed: [] as string[]
+      };
+
+      // Step 1: Try to unsubscribe from each email (optimistic)
+      for (const emailId of emailIds) {
+        try {
+          const response = await gmail.users.messages.get({
+            userId: 'me',
+            id: emailId,
+            format: 'full'
+          });
+
+          const headers = response.data.payload?.headers || [];
+          const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+          const listUnsubscribe = getHeader('List-Unsubscribe');
+          const fromHeader = getHeader('From');
+
+          if (listUnsubscribe) {
+            // Parse List-Unsubscribe header
+            const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
+            if (urlMatches) {
+              const urls = urlMatches.map(match => match.slice(1, -1));
+              const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+
+              if (httpUrls.length > 0) {
+                // Try first HTTP URL
+                const result = await makeHttpRequest(httpUrls[0]);
+                if (result.success) {
+                  results.unsubscribed.push(emailId);
+                  console.log(`✅ Unsubscribed from: ${fromHeader}`);
+                } else {
+                  results.unsubscribeFailed.push(emailId);
+                  console.log(`⚠️  Could not unsubscribe from: ${fromHeader} (will still archive)`);
+                }
+              } else {
+                results.unsubscribeFailed.push(emailId);
+              }
+            } else {
+              results.unsubscribeFailed.push(emailId);
+            }
+          } else {
+            results.unsubscribeFailed.push(emailId);
+          }
+        } catch (error) {
+          results.unsubscribeFailed.push(emailId);
+          console.log(`⚠️  Unsubscribe error for ${emailId}: ${error} (will still archive)`);
+        }
+      }
+
+      // Step 2: Archive all emails regardless of unsubscribe success
+      for (const emailId of emailIds) {
+        try {
+          await gmail.users.messages.modify({
+            userId: 'me',
+            id: emailId,
+            requestBody: {
+              removeLabelIds: ['INBOX']
+            }
+          });
+          results.archived.push(emailId);
+        } catch (error) {
+          results.archiveFailed.push(emailId);
+          console.log(`❌ Failed to archive email ${emailId}: ${error}`);
+        }
+      }
+
+      const summary = [
+        `Processed ${results.total} email(s):`,
+        `✅ Unsubscribed: ${results.unsubscribed.length}`,
+        `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`,
+        `📥 Archived: ${results.archived.length}`,
+        results.archiveFailed.length > 0 ? `❌ Archive failed: ${results.archiveFailed.length}` : null
+      ].filter(Boolean).join('\n');
+
+      console.log('\n' + summary);
+
+      return JSON.stringify({
+        success: results.archived.length > 0,
+        ...results,
+        summary: summary
+      }, null, 2);
+    }
+  });
+
+  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool, draftReplyTool, unsubscribeAndArchiveTool];
 }
 
 async function main() {
@@ -1047,6 +1147,13 @@ You have access to a persistent memory system that allows you to remember inform
   - Use this for Action Required emails that need thoughtful responses
   - Emily can review, edit, and send the draft from Gmail
 
+- **unsubscribe_and_archive**: ⚡ BATCH OPERATION - Sweep away junk newsletters efficiently
+  - Attempts to unsubscribe from multiple emails, then archives them all
+  - Optimistic: continues even if unsubscribe fails for some emails
+  - Perfect for processing "Unsubscribe" category in bulk
+  - Saves tokens by combining two operations into one
+  - Use this instead of calling unsubscribe_email and archive_email separately for multiple emails
+
 📋 **Email Classification System:**
 When asked to classify or organize emails, use these categories:
 
@@ -1150,7 +1257,7 @@ Group similar emails and present them with options. Format:
 1. Archive all
 2. Read specific email(s) (provide number/ID)
 3. Skip for now
-4. Unsubscribe from sender(s)
+4. Unsubscribe and archive all (use unsubscribe_and_archive tool for efficiency)
 
 Example: "Here are 10 Summarize & Inform emails from this week. [list]. Options: 1) Archive all, 2) Read specific email(s), 3) Skip for now, 4) Unsubscribe from sender(s)"
 
