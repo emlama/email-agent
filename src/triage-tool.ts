@@ -363,7 +363,7 @@ async function classifyEmailWithLLM(email: any, preferences: string, useSnippetO
   try {
     // Initialize Claude Haiku model (fast and cheap for classification)
     const model = new ChatAnthropic({
-      modelName: 'claude-haiku-4-20250514',
+      modelName: 'claude-3-5-haiku-latest',
       temperature: 0,
       apiKey: process.env.ANTHROPIC_API_KEY
     });

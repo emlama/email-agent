@@ -323,7 +323,7 @@ function createMemoryTools() {
 
   const viewTool = new DynamicStructuredTool({
     name: 'view_memory',
-    description: 'View the contents of the memory directory or a specific memory file. Use this to recall information from previous conversations.',
+    description: 'View memory directory contents or read a specific memory file. Call without path to list all files. Call with path (e.g., "email_preferences.md" or "triage/pending.json") to read file contents. Use to recall user preferences, contacts, and persistent state from previous sessions.',
     schema: z.object({
       path: z.string().optional().describe('Optional path to a specific file. If not provided, lists all files in /memories directory')
     }),
@@ -381,7 +381,7 @@ function createMemoryTools() {
 
   const createTool = new DynamicStructuredTool({
     name: 'create_memory',
-    description: 'Create a new memory file with content. Use this to remember important information across conversations.',
+    description: 'Create a new memory file with content (max 100KB). Fails if file already exists - use str_replace_memory or insert_memory to modify existing files. Only .txt and .md files allowed. Use to persist user preferences, contacts, important context for future sessions.',
     schema: z.object({
       path: z.string().describe('Path for the new file (e.g., "contacts.txt", "preferences.md")'),
       content: z.string().describe('Content to write to the file')
@@ -433,7 +433,7 @@ function createMemoryTools() {
 
   const strReplaceTool = new DynamicStructuredTool({
     name: 'str_replace_memory',
-    description: 'Replace a specific string in a memory file. Use this to update existing information.',
+    description: 'Replace a specific string in an existing memory file. Requires exact match of old_str. Fails if old_str not found or file doesn\'t exist. Use to update preferences, modify saved information, or fix errors in memory files.',
     schema: z.object({
       path: z.string().describe('Path to the file to modify'),
       old_str: z.string().describe('String to search for'),
@@ -491,7 +491,7 @@ function createMemoryTools() {
 
   const insertTool = new DynamicStructuredTool({
     name: 'insert_memory',
-    description: 'Insert content at a specific line in a memory file.',
+    description: 'Insert content at a specific line number (0-indexed) in an existing memory file. Use to add new entries to lists, append sections, or insert text at precise locations.',
     schema: z.object({
       path: z.string().describe('Path to the file to modify'),
       insert_line: z.number().describe('Line number to insert at (0-indexed)'),
@@ -551,7 +551,7 @@ function createMemoryTools() {
 
   const deleteTool = new DynamicStructuredTool({
     name: 'delete_memory',
-    description: 'Delete a memory file. Use with caution - this cannot be undone.',
+    description: 'Permanently delete a memory file. CANNOT BE UNDONE. Use with caution. Typically used to clean up temporary files or remove outdated information.',
     schema: z.object({
       path: z.string().describe('Path to the file to delete')
     }),
@@ -589,7 +589,7 @@ function createMemoryTools() {
 
   const renameTool = new DynamicStructuredTool({
     name: 'rename_memory',
-    description: 'Rename or move a memory file.',
+    description: 'Rename or move a memory file to a new path. Requires old_path and new_path. Fails if old file doesn\'t exist or new path already exists. Use to reorganize memory structure or rename files.',
     schema: z.object({
       old_path: z.string().describe('Current path of the file'),
       new_path: z.string().describe('New path for the file')
@@ -652,7 +652,7 @@ function createMemoryTools() {
 function createBatchedEmailTool() {
   const getBatchedEmailsTool = new DynamicStructuredTool({
     name: 'get_batched_emails',
-    description: 'Load a batch of triaged emails by category. Use this instead of view_memory("triage/pending.json") to prevent context overflow and hallucinations. Always load fresh batches when presenting emails to the user.',
+    description: 'Load a paginated batch of triaged emails by category from pending.json. ALWAYS use this instead of view_memory("triage/pending.json") to prevent context overflow and hallucinations. Requires category name (ACTION_REQUIRED, SUMMARIZE_EVENTS, etc.). Returns offset/limit pagination info. Load 5 emails for ACTION_REQUIRED, 10-20 for bulk categories.',
     schema: z.object({
       category: z.string().describe('Category to filter by: ACTION_REQUIRED, SUMMARIZE_EVENTS, SUMMARIZE_PURCHASES, SUMMARIZE_AND_INFORM, UNSUBSCRIBE, IMMEDIATE_ARCHIVE, OTHER'),
       offset: z.number().optional().default(0).describe('Starting index (0-based, default: 0)'),
@@ -709,7 +709,7 @@ function createBatchedEmailTool() {
 function createGmailTools(gmailService: GmailService) {
   const listEmailsTool = new DynamicStructuredTool({
     name: 'list_emails',
-    description: 'List emails from Gmail inbox with flexible filters including time ranges, sender, subject, and more',
+    description: 'Search and list emails from Gmail with flexible filters. Returns metadata (subject, from, date, snippet) for each email. WARNING: Returns full email details which consume many tokens. For bulk operations, prefer unsubscribe_and_archive_by_query instead.',
     schema: z.object({
       maxResults: z.number().optional().default(10).describe('Maximum number of emails to retrieve (default: 10, max: 100)'),
       query: z.string().optional().describe('Raw Gmail search query (e.g., "is:unread", "from:sender@email.com")'),
@@ -786,7 +786,7 @@ function createGmailTools(gmailService: GmailService) {
 
   const readEmailTool = new DynamicStructuredTool({
     name: 'read_email',
-    description: 'Read the full content of a specific email by ID',
+    description: 'Read the full content (subject, from, to, date, body) of a specific email by its Gmail message ID. Use when you need the complete email body, not just the snippet.',
     schema: z.object({
       emailId: z.string().describe('Gmail message ID of the email to read')
     }),
@@ -830,17 +830,23 @@ function createGmailTools(gmailService: GmailService) {
 
   const archiveEmailTool = new DynamicStructuredTool({
     name: 'archive_email',
-    description: 'Archive one or more emails by removing them from the inbox (they will still be accessible in All Mail)',
+    description: 'Archive one or more emails by their IDs (removes from inbox, keeps in All Mail). Optionally attempts to unsubscribe after archiving. Accepts array of email IDs. Use for archiving specific emails when you already have their IDs.',
     schema: z.object({
-      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to archive')
+      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to archive'),
+      attemptUnsubscribe: z.boolean().optional().default(false).describe('If true, attempts to unsubscribe from each email after archiving (via List-Unsubscribe header). Archive happens regardless of unsubscribe success.')
     }),
-    func: async ({ emailIds }: any): Promise<string> => {
+    func: async ({ emailIds, attemptUnsubscribe = false }: any): Promise<string> => {
       await gmailService.refreshTokenIfNeeded();
       const gmail = gmailService.getGmailApi();
 
-      const results = [];
-      const errors = [];
+      const results = {
+        archived: [] as string[],
+        archiveFailed: [] as any[],
+        unsubscribed: [] as string[],
+        unsubscribeFailed: [] as string[]
+      };
 
+      // Step 1: Archive all emails first
       for (const emailId of emailIds) {
         try {
           await gmail.users.messages.modify({
@@ -850,26 +856,82 @@ function createGmailTools(gmailService: GmailService) {
               removeLabelIds: ['INBOX']
             }
           });
-          results.push(emailId);
+          results.archived.push(emailId);
           console.log(`✅ Archived email: ${emailId}`);
         } catch (error) {
-          errors.push({ emailId, error: String(error) });
+          results.archiveFailed.push({ emailId, error: String(error) });
           console.log(`❌ Failed to archive email ${emailId}: ${error}`);
         }
       }
 
+      // Step 2: Optionally attempt unsubscribe (only for successfully archived emails)
+      if (attemptUnsubscribe && results.archived.length > 0) {
+        console.log(`📧 Attempting to unsubscribe from ${results.archived.length} archived email(s)...`);
+
+        for (const emailId of results.archived) {
+          try {
+            const response = await gmail.users.messages.get({
+              userId: 'me',
+              id: emailId,
+              format: 'full'
+            });
+
+            const headers = response.data.payload?.headers || [];
+            const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+            const listUnsubscribe = getHeader('List-Unsubscribe');
+            const fromHeader = getHeader('From');
+
+            if (listUnsubscribe) {
+              const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
+              if (urlMatches) {
+                const urls = urlMatches.map(match => match.slice(1, -1));
+                const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+
+                if (httpUrls.length > 0) {
+                  const result = await makeHttpRequest(httpUrls[0]);
+                  if (result.success) {
+                    results.unsubscribed.push(emailId);
+                    console.log(`✅ Unsubscribed from: ${fromHeader}`);
+                  } else {
+                    results.unsubscribeFailed.push(emailId);
+                  }
+                } else {
+                  results.unsubscribeFailed.push(emailId);
+                }
+              } else {
+                results.unsubscribeFailed.push(emailId);
+              }
+            } else {
+              results.unsubscribeFailed.push(emailId);
+            }
+          } catch (error) {
+            results.unsubscribeFailed.push(emailId);
+            console.log(`⚠️  Unsubscribe error for ${emailId}: ${error}`);
+          }
+        }
+      }
+
+      const summary = attemptUnsubscribe
+        ? `Archived ${results.archived.length} email(s)${results.archiveFailed.length > 0 ? `, failed to archive ${results.archiveFailed.length}` : ''}. Unsubscribed: ${results.unsubscribed.length}, failed: ${results.unsubscribeFailed.length}.`
+        : `Successfully archived ${results.archived.length} email(s)${results.archiveFailed.length > 0 ? `, failed to archive ${results.archiveFailed.length}` : ''}`;
+
       return JSON.stringify({
-        success: results.length > 0,
-        archived: results,
-        failed: errors,
-        message: `Successfully archived ${results.length} email(s)${errors.length > 0 ? `, failed to archive ${errors.length}` : ''}`
+        success: results.archived.length > 0,
+        archived: results.archived.length,
+        archiveFailed: results.archiveFailed.length,
+        ...(attemptUnsubscribe ? {
+          unsubscribed: results.unsubscribed.length,
+          unsubscribeFailed: results.unsubscribeFailed.length
+        } : {}),
+        message: summary
       }, null, 2);
     }
   });
 
   const unsubscribeEmailTool = new DynamicStructuredTool({
     name: 'unsubscribe_email',
-    description: 'Automatically unsubscribe from an email by parsing the List-Unsubscribe header and making the necessary HTTP request',
+    description: 'Automatically unsubscribe from a single email by parsing its List-Unsubscribe header and making HTTP request. Returns success/failure. Use for individual emails; for batch unsubscribe operations use unsubscribe_and_archive_by_ids or unsubscribe_and_archive_by_query.',
     schema: z.object({
       emailId: z.string().describe('Gmail message ID of the email to unsubscribe from')
     }),
@@ -967,7 +1029,7 @@ function createGmailTools(gmailService: GmailService) {
 
   const draftReplyTool = new DynamicStructuredTool({
     name: 'draft_reply',
-    description: 'Create a draft reply to an email. The draft will be saved in Gmail and can be reviewed/edited before sending.',
+    description: 'Create a draft reply to an email by ID. Requires emailId and replyBody. Draft is saved in Gmail (not sent) and preserves threading. User can review/edit/send from Gmail. Returns draft ID and preview.',
     schema: z.object({
       emailId: z.string().describe('Gmail message ID of the email to reply to'),
       replyBody: z.string().describe('The content of the reply message')
@@ -1055,13 +1117,13 @@ function createGmailTools(gmailService: GmailService) {
     }
   });
 
-  // Helper function for unsubscribe and archive logic (shared between both tools)
-  async function processUnsubscribeAndArchive(emailIds: string[]): Promise<{
+  // Helper function for archive and optionally unsubscribe logic (shared between both tools)
+  async function processArchiveAndUnsubscribe(emailIds: string[], attemptUnsubscribe: boolean): Promise<{
     total: number;
-    unsubscribed: string[];
-    unsubscribeFailed: string[];
     archived: string[];
     archiveFailed: string[];
+    unsubscribed: string[];
+    unsubscribeFailed: string[];
     emailDetails: Array<{ id: string; from: string; subject: string }>;
   }> {
     await gmailService.refreshTokenIfNeeded();
@@ -1069,69 +1131,15 @@ function createGmailTools(gmailService: GmailService) {
 
     const results = {
       total: emailIds.length,
-      unsubscribed: [] as string[],
-      unsubscribeFailed: [] as string[],
       archived: [] as string[],
       archiveFailed: [] as string[],
+      unsubscribed: [] as string[],
+      unsubscribeFailed: [] as string[],
       emailDetails: [] as Array<{ id: string; from: string; subject: string }>
     };
 
-    // Step 1: Try to unsubscribe from each email (optimistic)
-    for (const emailId of emailIds) {
-      try {
-        const response = await gmail.users.messages.get({
-          userId: 'me',
-          id: emailId,
-          format: 'full'
-        });
-
-        const headers = response.data.payload?.headers || [];
-        const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
-
-        const listUnsubscribe = getHeader('List-Unsubscribe');
-        const fromHeader = getHeader('From');
-        const subjectHeader = getHeader('Subject');
-
-        // Store email details for dry run preview
-        results.emailDetails.push({
-          id: emailId,
-          from: fromHeader,
-          subject: subjectHeader
-        });
-
-        if (listUnsubscribe) {
-          // Parse List-Unsubscribe header
-          const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
-          if (urlMatches) {
-            const urls = urlMatches.map(match => match.slice(1, -1));
-            const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
-
-            if (httpUrls.length > 0) {
-              // Try first HTTP URL
-              const result = await makeHttpRequest(httpUrls[0]);
-              if (result.success) {
-                results.unsubscribed.push(emailId);
-                console.log(`✅ Unsubscribed from: ${fromHeader}`);
-              } else {
-                results.unsubscribeFailed.push(emailId);
-                console.log(`⚠️  Could not unsubscribe from: ${fromHeader} (will still archive)`);
-              }
-            } else {
-              results.unsubscribeFailed.push(emailId);
-            }
-          } else {
-            results.unsubscribeFailed.push(emailId);
-          }
-        } else {
-          results.unsubscribeFailed.push(emailId);
-        }
-      } catch (error) {
-        results.unsubscribeFailed.push(emailId);
-        console.log(`⚠️  Unsubscribe error for ${emailId}: ${error} (will still archive)`);
-      }
-    }
-
-    // Step 2: Archive all emails regardless of unsubscribe success
+    // Step 1: Archive all emails first
+    console.log(`📥 Archiving ${emailIds.length} email(s)...`);
     for (const emailId of emailIds) {
       try {
         await gmail.users.messages.modify({
@@ -1142,9 +1150,68 @@ function createGmailTools(gmailService: GmailService) {
           }
         });
         results.archived.push(emailId);
+        console.log(`✅ Archived email: ${emailId}`);
       } catch (error) {
         results.archiveFailed.push(emailId);
         console.log(`❌ Failed to archive email ${emailId}: ${error}`);
+      }
+    }
+
+    // Step 2: Optionally attempt to unsubscribe (only from successfully archived emails)
+    if (attemptUnsubscribe && results.archived.length > 0) {
+      console.log(`📧 Attempting to unsubscribe from ${results.archived.length} archived email(s)...`);
+
+      for (const emailId of results.archived) {
+        try {
+          const response = await gmail.users.messages.get({
+            userId: 'me',
+            id: emailId,
+            format: 'full'
+          });
+
+          const headers = response.data.payload?.headers || [];
+          const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+          const listUnsubscribe = getHeader('List-Unsubscribe');
+          const fromHeader = getHeader('From');
+          const subjectHeader = getHeader('Subject');
+
+          // Store email details for reference
+          results.emailDetails.push({
+            id: emailId,
+            from: fromHeader,
+            subject: subjectHeader
+          });
+
+          if (listUnsubscribe) {
+            // Parse List-Unsubscribe header
+            const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
+            if (urlMatches) {
+              const urls = urlMatches.map(match => match.slice(1, -1));
+              const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+
+              if (httpUrls.length > 0) {
+                // Try first HTTP URL
+                const result = await makeHttpRequest(httpUrls[0]);
+                if (result.success) {
+                  results.unsubscribed.push(emailId);
+                  console.log(`✅ Unsubscribed from: ${fromHeader}`);
+                } else {
+                  results.unsubscribeFailed.push(emailId);
+                }
+              } else {
+                results.unsubscribeFailed.push(emailId);
+              }
+            } else {
+              results.unsubscribeFailed.push(emailId);
+            }
+          } else {
+            results.unsubscribeFailed.push(emailId);
+          }
+        } catch (error) {
+          results.unsubscribeFailed.push(emailId);
+          console.log(`⚠️  Unsubscribe error for ${emailId}: ${error}`);
+        }
       }
     }
 
@@ -1153,30 +1220,39 @@ function createGmailTools(gmailService: GmailService) {
 
   const unsubscribeAndArchiveByIdsTool = new DynamicStructuredTool({
     name: 'unsubscribe_and_archive_by_ids',
-    description: 'Batch operation: attempt to unsubscribe from specific emails by ID and then archive them all. Use when you have specific email IDs to process. Optimistic - continues even if unsubscribe fails.',
+    description: 'Batch operation: archive specific emails by their IDs, then optionally unsubscribe. Archives all emails first (reliable), then attempts unsubscribe if requested. Returns summary statistics. Use when you already have email IDs from triage or list_emails.',
     schema: z.object({
-      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to unsubscribe and archive')
+      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to archive'),
+      attemptUnsubscribe: z.boolean().optional().default(true).describe('If true, attempts to unsubscribe from each email after archiving (via List-Unsubscribe header). Defaults to true for this tool.')
     }),
-    func: async ({ emailIds }: any): Promise<string> => {
-      const results = await processUnsubscribeAndArchive(emailIds);
+    func: async ({ emailIds, attemptUnsubscribe = true }: any): Promise<string> => {
+      const results = await processArchiveAndUnsubscribe(emailIds, attemptUnsubscribe);
 
-      const summary = [
+      const summaryParts = [
         `Processed ${results.total} email(s):`,
-        `✅ Unsubscribed: ${results.unsubscribed.length}`,
-        `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`,
         `📥 Archived: ${results.archived.length}`,
         results.archiveFailed.length > 0 ? `❌ Archive failed: ${results.archiveFailed.length}` : null
-      ].filter(Boolean).join('\n');
+      ];
 
+      if (attemptUnsubscribe) {
+        summaryParts.push(
+          `✅ Unsubscribed: ${results.unsubscribed.length}`,
+          `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`
+        );
+      }
+
+      const summary = summaryParts.filter(Boolean).join('\n');
       console.log('\n' + summary);
 
       return JSON.stringify({
         success: results.archived.length > 0,
         total: results.total,
-        unsubscribed: results.unsubscribed.length,
-        unsubscribeFailed: results.unsubscribeFailed.length,
         archived: results.archived.length,
         archiveFailed: results.archiveFailed.length,
+        ...(attemptUnsubscribe ? {
+          unsubscribed: results.unsubscribed.length,
+          unsubscribeFailed: results.unsubscribeFailed.length
+        } : {}),
         summary: summary
       }, null, 2);
     }
@@ -1184,10 +1260,11 @@ function createGmailTools(gmailService: GmailService) {
 
   const unsubscribeAndArchiveByQueryTool = new DynamicStructuredTool({
     name: 'unsubscribe_and_archive_by_query',
-    description: 'Batch operation: search for emails using filters and then unsubscribe & archive them. Much more efficient than list_emails + unsubscribe_and_archive_by_ids. Use dryRun=true to preview matches before processing.',
+    description: 'RECOMMENDED for bulk operations: Search emails by filters (timeRange, from, subject, etc.), then archive and optionally unsubscribe. Much more efficient than list_emails + unsubscribe_and_archive_by_ids (processes server-side, minimal tokens). ALWAYS use dryRun=true first to preview matches, then dryRun=false to execute. Returns summary statistics only.',
     schema: z.object({
       maxResults: z.number().optional().default(100).describe('Maximum number of emails to process (default: 100, max: 500). Safety limit to prevent accidental bulk operations.'),
       dryRun: z.boolean().optional().default(false).describe('If true, only return preview of matching emails without processing them. Use this to verify the query matches the right emails.'),
+      attemptUnsubscribe: z.boolean().optional().default(true).describe('If true, attempts to unsubscribe from each email after archiving (via List-Unsubscribe header). Defaults to true for this tool.'),
       query: z.string().optional().describe('Raw Gmail search query (e.g., "is:unread", "from:sender@email.com")'),
       timeRange: z.string().optional().describe('Time range filter: "today", "yesterday", "last week", "last month", "last 3 days", or "Xd" for X days'),
       from: z.string().optional().describe('Filter by sender email address or name'),
@@ -1201,6 +1278,7 @@ function createGmailTools(gmailService: GmailService) {
       const {
         maxResults = 100,
         dryRun = false,
+        attemptUnsubscribe = true,
         query,
         timeRange,
         from,
@@ -1288,26 +1366,34 @@ function createGmailTools(gmailService: GmailService) {
 
       // REAL RUN: Process all matching emails
       console.log(`⚙️  Processing ${emailIds.length} emails...`);
-      const results = await processUnsubscribeAndArchive(emailIds);
+      const results = await processArchiveAndUnsubscribe(emailIds, attemptUnsubscribe);
 
-      const summary = [
+      const summaryParts = [
         `Processed ${results.total} email(s):`,
-        `✅ Unsubscribed: ${results.unsubscribed.length}`,
-        `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`,
         `📥 Archived: ${results.archived.length}`,
         results.archiveFailed.length > 0 ? `❌ Archive failed: ${results.archiveFailed.length}` : null
-      ].filter(Boolean).join('\n');
+      ];
 
+      if (attemptUnsubscribe) {
+        summaryParts.push(
+          `✅ Unsubscribed: ${results.unsubscribed.length}`,
+          `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`
+        );
+      }
+
+      const summary = summaryParts.filter(Boolean).join('\n');
       console.log('\n' + summary);
 
       return JSON.stringify({
         success: results.archived.length > 0,
         query: gmailQuery,
         total: results.total,
-        unsubscribed: results.unsubscribed.length,
-        unsubscribeFailed: results.unsubscribeFailed.length,
         archived: results.archived.length,
         archiveFailed: results.archiveFailed.length,
+        ...(attemptUnsubscribe ? {
+          unsubscribed: results.unsubscribed.length,
+          unsubscribeFailed: results.unsubscribeFailed.length
+        } : {}),
         summary: summary
       }, null, 2);
     }
@@ -1345,7 +1431,7 @@ async function main() {
 
   // Initialize Claude model with memory tool beta and prompt caching
   const model = new ChatAnthropic({
-    model: 'claude-3-5-sonnet-20241022',
+    model: 'claude-sonnet-4-20250514',
     apiKey: process.env.ANTHROPIC_API_KEY,
     clientOptions: {
       defaultHeaders: {
