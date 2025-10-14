@@ -4,10 +4,11 @@ This guide will help you set up your personal Gmail management agent using the C
 
 ## Prerequisites
 
-- Node.js (v16 or higher)
-- A Gmail account
-- A Google Cloud Console account (free)
-- An Anthropic API key
+- **Node.js** v16 or higher (v18+ recommended)
+- **npm** (comes with Node.js)
+- A **Gmail account**
+- A **Google Cloud Console** account (free)
+- An **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com/)
 
 ## Step 1: Install Dependencies
 
@@ -24,7 +25,7 @@ cp .env.example .env
 
 2. Add your Anthropic API key to the `.env` file:
 ```
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
+ANTHROPIC_API_KEY=your-api-key-here
 ```
 
 You can get your API key from [Anthropic Console](https://console.anthropic.com/).
@@ -58,19 +59,25 @@ You can get your API key from [Anthropic Console](https://console.anthropic.com/
 2. Save the JSON file as `gmail-credentials.json` in your project root directory
 3. **Important**: Add `gmail-credentials.json` to your `.gitignore` file to keep it secure
 
-## Step 4: Build the Project
+## Step 4: Run the Agent
 
-```bash
-npm run build
-```
-
-## Step 5: Run the Agent
+**For development (recommended):**
 
 ```bash
 npm run dev
 ```
 
-## Step 6: First-Time Authentication
+This runs the agent with auto-reload during development using `tsx`.
+
+**For production (optional):**
+```bash
+npm run build  # Compile TypeScript to JavaScript
+npm start      # Run compiled version
+```
+
+Note: Most users should use `npm run dev` for the best development experience.
+
+## Step 5: First-Time Authentication
 
 When you first run the agent, it will guide you through the authentication process:
 
@@ -110,6 +117,32 @@ The agent will save your authentication tokens for future use.
 - Delete `gmail-tokens.json` and re-authenticate
 - The agent will guide you through the process again
 
+## Verify Your Setup
+
+After first run, you should see:
+```
+✓ Gmail authenticated successfully
+✓ Agent initialized
+```
+
+Your project directory should now contain:
+- `gmail-tokens.json` - Your OAuth tokens (auto-generated)
+- `memories/` - Directory for persistent memory storage (auto-created)
+
 ## Next Steps
 
 Once setup is complete, check out the [USAGE.md](./USAGE.md) file for instructions on how to use your email agent.
+
+## Development Commands
+
+### Quick Reference
+```bash
+npm run dev     # Run in development mode (recommended)
+npm run build   # Compile TypeScript to JavaScript
+npm start       # Run compiled production version
+```
+
+### When to Use Each Command
+- **`npm run dev`**: Daily usage, development, testing new features
+- **`npm run build`**: Only needed before deploying or running production build
+- **`npm start`**: Run the compiled version (requires `npm run build` first)
