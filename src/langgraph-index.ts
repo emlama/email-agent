@@ -4,6 +4,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { GmailService } from './gmail-service';
+import { createTriageTool } from './triage-tool';
 import * as readline from 'readline';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -24,6 +25,33 @@ function askQuestion(question: string): Promise<string> {
   });
 }
 
+// Helper function to convert color tags to ANSI codes
+function applyColors(text: string): string {
+  const colorMap: Record<string, string> = {
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    reset: '\x1b[0m'
+  };
+
+  let result = text;
+
+  // Replace opening tags
+  for (const [color, code] of Object.entries(colorMap)) {
+    result = result.replace(new RegExp(`\\[${color}\\]`, 'gi'), code);
+  }
+
+  // Replace all closing tags with reset code
+  result = result.replace(/\[\/(red|green|yellow|blue|magenta|cyan|bold|dim)\]/gi, '\x1b[0m');
+
+  return result;
+}
+
 async function initializeGmail(): Promise<GmailService | null> {
   const credentialsPath = path.join(process.cwd(), 'gmail-credentials.json');
   const tokenPath = path.join(process.cwd(), 'gmail-tokens.json');
@@ -35,8 +63,6 @@ async function initializeGmail(): Promise<GmailService | null> {
   }
 
   try {
-    console.log('🔧 Initializing Gmail...');
-
     const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
     const gmailCreds = {
       client_id: credentials.installed?.client_id || credentials.web?.client_id,
@@ -50,7 +76,7 @@ async function initializeGmail(): Promise<GmailService | null> {
     const tokens = gmailService.loadTokens(tokenPath);
 
     if (tokens) {
-      console.log('✅ Gmail authenticated with existing tokens\n');
+      // Silent success - only show errors
       return gmailService;
     } else {
       const authUrl = gmailService.getAuthUrl();
@@ -218,6 +244,44 @@ function formatDate(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}/${month}/${day}`;
+}
+
+// Helper function to convert RFC 2822 email dates to East Coast timezone
+function formatEmailDate(rfc2822Date: string): string {
+  try {
+    // Parse RFC 2822 date string to Date object
+    const date = new Date(rfc2822Date);
+
+    if (isNaN(date.getTime())) {
+      return rfc2822Date; // Return original if parsing fails
+    }
+
+    // Convert to East Coast timezone (America/New_York)
+    // This automatically handles EDT (UTC-4) and EST (UTC-5)
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: 'America/New_York',
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    };
+
+    const formatted = new Intl.DateTimeFormat('en-US', options).format(date);
+
+    // Add timezone indicator
+    const now = new Date();
+    const januaryOffset = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
+    const julyOffset = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
+    const isDST = Math.max(januaryOffset, julyOffset) !== date.getTimezoneOffset();
+    const tzAbbr = isDST ? 'EDT' : 'EST';
+
+    return `${formatted} ${tzAbbr}`;
+  } catch (error) {
+    return rfc2822Date; // Return original if conversion fails
+  }
 }
 
 // Helper function to validate and sanitize memory file paths
@@ -584,6 +648,63 @@ function createMemoryTools() {
   return [viewTool, createTool, strReplaceTool, insertTool, deleteTool, renameTool];
 }
 
+// Create batched email loading tool for pagination
+function createBatchedEmailTool() {
+  const getBatchedEmailsTool = new DynamicStructuredTool({
+    name: 'get_batched_emails',
+    description: 'Load a batch of triaged emails by category. Use this instead of view_memory("triage/pending.json") to prevent context overflow and hallucinations. Always load fresh batches when presenting emails to the user.',
+    schema: z.object({
+      category: z.string().describe('Category to filter by: ACTION_REQUIRED, SUMMARIZE_EVENTS, SUMMARIZE_PURCHASES, SUMMARIZE_AND_INFORM, UNSUBSCRIBE, IMMEDIATE_ARCHIVE, OTHER'),
+      offset: z.number().optional().default(0).describe('Starting index (0-based, default: 0)'),
+      limit: z.number().optional().default(5).describe('Number of emails to load (default: 5, max: 20)')
+    }),
+    func: async ({ category, offset = 0, limit = 5 }: any): Promise<string> => {
+      try {
+        const pendingPath = path.join(process.cwd(), 'memories', 'triage', 'pending.json');
+
+        if (!fs.existsSync(pendingPath)) {
+          return JSON.stringify({
+            success: false,
+            error: 'No pending triage found. Run triage_inbox first.'
+          }, null, 2);
+        }
+
+        const pendingData = JSON.parse(fs.readFileSync(pendingPath, 'utf-8'));
+
+        // Filter emails by category
+        const categoryEmails = pendingData.emails.filter((email: any) => email.category === category);
+
+        // Apply pagination
+        const batchLimit = Math.min(limit, 20); // Max 20 emails per batch
+        const batchEmails = categoryEmails.slice(offset, offset + batchLimit);
+
+        return JSON.stringify({
+          success: true,
+          category: category,
+          batch: {
+            offset: offset,
+            limit: batchLimit,
+            returned: batchEmails.length,
+            total_in_category: categoryEmails.length
+          },
+          emails: batchEmails,
+          has_more: offset + batchEmails.length < categoryEmails.length,
+          next_offset: offset + batchEmails.length,
+          last_updated: pendingData.last_updated
+        }, null, 2);
+
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: String(error)
+        }, null, 2);
+      }
+    }
+  });
+
+  return getBatchedEmailsTool;
+}
+
 // Create Gmail tools using LangGraph's DynamicStructuredTool
 function createGmailTools(gmailService: GmailService) {
   const listEmailsTool = new DynamicStructuredTool({
@@ -638,7 +759,7 @@ function createGmailTools(gmailService: GmailService) {
       const messages = response.data.messages || [];
       const emailDetails = [];
 
-      for (const msg of messages.slice(0, Math.min(maxResults, 20))) {
+      for (const msg of messages.slice(0, maxResults)) {
         const details = await gmail.users.messages.get({
           userId: 'me',
           id: msg.id!,
@@ -653,7 +774,7 @@ function createGmailTools(gmailService: GmailService) {
           id: msg.id,
           subject: getHeader('Subject'),
           from: getHeader('From'),
-          date: getHeader('Date'),
+          date: formatEmailDate(getHeader('Date')),
           to: getHeader('To'),
           snippet: details.data.snippet
         });
@@ -701,7 +822,7 @@ function createGmailTools(gmailService: GmailService) {
         subject: getHeader('Subject'),
         from: getHeader('From'),
         to: getHeader('To'),
-        date: getHeader('Date'),
+        date: formatEmailDate(getHeader('Date')),
         body: body || response.data.snippet
       }, null, 2);
     }
@@ -934,58 +1055,66 @@ function createGmailTools(gmailService: GmailService) {
     }
   });
 
-  const unsubscribeAndArchiveTool = new DynamicStructuredTool({
-    name: 'unsubscribe_and_archive',
-    description: 'Batch operation: attempt to unsubscribe from multiple emails and then archive them all. Perfect for sweeping away junk newsletters. Optimistic - continues even if unsubscribe fails.',
-    schema: z.object({
-      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to unsubscribe and archive')
-    }),
-    func: async ({ emailIds }: any): Promise<string> => {
-      await gmailService.refreshTokenIfNeeded();
-      const gmail = gmailService.getGmailApi();
+  // Helper function for unsubscribe and archive logic (shared between both tools)
+  async function processUnsubscribeAndArchive(emailIds: string[]): Promise<{
+    total: number;
+    unsubscribed: string[];
+    unsubscribeFailed: string[];
+    archived: string[];
+    archiveFailed: string[];
+    emailDetails: Array<{ id: string; from: string; subject: string }>;
+  }> {
+    await gmailService.refreshTokenIfNeeded();
+    const gmail = gmailService.getGmailApi();
 
-      const results = {
-        total: emailIds.length,
-        unsubscribed: [] as string[],
-        unsubscribeFailed: [] as string[],
-        archived: [] as string[],
-        archiveFailed: [] as string[]
-      };
+    const results = {
+      total: emailIds.length,
+      unsubscribed: [] as string[],
+      unsubscribeFailed: [] as string[],
+      archived: [] as string[],
+      archiveFailed: [] as string[],
+      emailDetails: [] as Array<{ id: string; from: string; subject: string }>
+    };
 
-      // Step 1: Try to unsubscribe from each email (optimistic)
-      for (const emailId of emailIds) {
-        try {
-          const response = await gmail.users.messages.get({
-            userId: 'me',
-            id: emailId,
-            format: 'full'
-          });
+    // Step 1: Try to unsubscribe from each email (optimistic)
+    for (const emailId of emailIds) {
+      try {
+        const response = await gmail.users.messages.get({
+          userId: 'me',
+          id: emailId,
+          format: 'full'
+        });
 
-          const headers = response.data.payload?.headers || [];
-          const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+        const headers = response.data.payload?.headers || [];
+        const getHeader = (name: string) => headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
 
-          const listUnsubscribe = getHeader('List-Unsubscribe');
-          const fromHeader = getHeader('From');
+        const listUnsubscribe = getHeader('List-Unsubscribe');
+        const fromHeader = getHeader('From');
+        const subjectHeader = getHeader('Subject');
 
-          if (listUnsubscribe) {
-            // Parse List-Unsubscribe header
-            const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
-            if (urlMatches) {
-              const urls = urlMatches.map(match => match.slice(1, -1));
-              const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+        // Store email details for dry run preview
+        results.emailDetails.push({
+          id: emailId,
+          from: fromHeader,
+          subject: subjectHeader
+        });
 
-              if (httpUrls.length > 0) {
-                // Try first HTTP URL
-                const result = await makeHttpRequest(httpUrls[0]);
-                if (result.success) {
-                  results.unsubscribed.push(emailId);
-                  console.log(`✅ Unsubscribed from: ${fromHeader}`);
-                } else {
-                  results.unsubscribeFailed.push(emailId);
-                  console.log(`⚠️  Could not unsubscribe from: ${fromHeader} (will still archive)`);
-                }
+        if (listUnsubscribe) {
+          // Parse List-Unsubscribe header
+          const urlMatches = listUnsubscribe.match(/<([^>]+)>/g);
+          if (urlMatches) {
+            const urls = urlMatches.map(match => match.slice(1, -1));
+            const httpUrls = urls.filter(url => url.startsWith('http://') || url.startsWith('https://'));
+
+            if (httpUrls.length > 0) {
+              // Try first HTTP URL
+              const result = await makeHttpRequest(httpUrls[0]);
+              if (result.success) {
+                results.unsubscribed.push(emailId);
+                console.log(`✅ Unsubscribed from: ${fromHeader}`);
               } else {
                 results.unsubscribeFailed.push(emailId);
+                console.log(`⚠️  Could not unsubscribe from: ${fromHeader} (will still archive)`);
               }
             } else {
               results.unsubscribeFailed.push(emailId);
@@ -993,28 +1122,43 @@ function createGmailTools(gmailService: GmailService) {
           } else {
             results.unsubscribeFailed.push(emailId);
           }
-        } catch (error) {
+        } else {
           results.unsubscribeFailed.push(emailId);
-          console.log(`⚠️  Unsubscribe error for ${emailId}: ${error} (will still archive)`);
         }
+      } catch (error) {
+        results.unsubscribeFailed.push(emailId);
+        console.log(`⚠️  Unsubscribe error for ${emailId}: ${error} (will still archive)`);
       }
+    }
 
-      // Step 2: Archive all emails regardless of unsubscribe success
-      for (const emailId of emailIds) {
-        try {
-          await gmail.users.messages.modify({
-            userId: 'me',
-            id: emailId,
-            requestBody: {
-              removeLabelIds: ['INBOX']
-            }
-          });
-          results.archived.push(emailId);
-        } catch (error) {
-          results.archiveFailed.push(emailId);
-          console.log(`❌ Failed to archive email ${emailId}: ${error}`);
-        }
+    // Step 2: Archive all emails regardless of unsubscribe success
+    for (const emailId of emailIds) {
+      try {
+        await gmail.users.messages.modify({
+          userId: 'me',
+          id: emailId,
+          requestBody: {
+            removeLabelIds: ['INBOX']
+          }
+        });
+        results.archived.push(emailId);
+      } catch (error) {
+        results.archiveFailed.push(emailId);
+        console.log(`❌ Failed to archive email ${emailId}: ${error}`);
       }
+    }
+
+    return results;
+  }
+
+  const unsubscribeAndArchiveByIdsTool = new DynamicStructuredTool({
+    name: 'unsubscribe_and_archive_by_ids',
+    description: 'Batch operation: attempt to unsubscribe from specific emails by ID and then archive them all. Use when you have specific email IDs to process. Optimistic - continues even if unsubscribe fails.',
+    schema: z.object({
+      emailIds: z.array(z.string()).describe('Array of Gmail message IDs to unsubscribe and archive')
+    }),
+    func: async ({ emailIds }: any): Promise<string> => {
+      const results = await processUnsubscribeAndArchive(emailIds);
 
       const summary = [
         `Processed ${results.total} email(s):`,
@@ -1028,26 +1172,158 @@ function createGmailTools(gmailService: GmailService) {
 
       return JSON.stringify({
         success: results.archived.length > 0,
-        ...results,
+        total: results.total,
+        unsubscribed: results.unsubscribed.length,
+        unsubscribeFailed: results.unsubscribeFailed.length,
+        archived: results.archived.length,
+        archiveFailed: results.archiveFailed.length,
         summary: summary
       }, null, 2);
     }
   });
 
-  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool, draftReplyTool, unsubscribeAndArchiveTool];
+  const unsubscribeAndArchiveByQueryTool = new DynamicStructuredTool({
+    name: 'unsubscribe_and_archive_by_query',
+    description: 'Batch operation: search for emails using filters and then unsubscribe & archive them. Much more efficient than list_emails + unsubscribe_and_archive_by_ids. Use dryRun=true to preview matches before processing.',
+    schema: z.object({
+      maxResults: z.number().optional().default(100).describe('Maximum number of emails to process (default: 100, max: 500). Safety limit to prevent accidental bulk operations.'),
+      dryRun: z.boolean().optional().default(false).describe('If true, only return preview of matching emails without processing them. Use this to verify the query matches the right emails.'),
+      query: z.string().optional().describe('Raw Gmail search query (e.g., "is:unread", "from:sender@email.com")'),
+      timeRange: z.string().optional().describe('Time range filter: "today", "yesterday", "last week", "last month", "last 3 days", or "Xd" for X days'),
+      from: z.string().optional().describe('Filter by sender email address or name'),
+      to: z.string().optional().describe('Filter by recipient email address'),
+      subject: z.string().optional().describe('Filter by subject keywords'),
+      hasAttachment: z.boolean().optional().describe('Filter for emails with attachments'),
+      isUnread: z.boolean().optional().describe('Filter by read/unread status (true for unread, false for read)'),
+      label: z.string().optional().describe('Filter by Gmail label (e.g., "inbox", "important", "sent")')
+    }),
+    func: async (params: any): Promise<string> => {
+      const {
+        maxResults = 100,
+        dryRun = false,
+        query,
+        timeRange,
+        from,
+        to,
+        subject,
+        hasAttachment,
+        isUnread,
+        label
+      } = params;
+
+      await gmailService.refreshTokenIfNeeded();
+      const gmail = gmailService.getGmailApi();
+
+      // Build Gmail query using existing helper function
+      const gmailQuery = buildGmailQuery({
+        query,
+        timeRange,
+        from,
+        to,
+        subject,
+        hasAttachment,
+        isUnread,
+        label
+      });
+
+      console.log(`📧 Searching with query: ${gmailQuery}`);
+
+      // Fetch matching email IDs
+      const response = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: Math.min(maxResults, 500),
+        q: gmailQuery
+      });
+
+      const messages = response.data.messages || [];
+
+      if (messages.length === 0) {
+        return JSON.stringify({
+          success: false,
+          matched: 0,
+          message: 'No emails found matching the query',
+          query: gmailQuery
+        }, null, 2);
+      }
+
+      const emailIds = messages.map(m => m.id!);
+
+      // DRY RUN: Just return preview
+      if (dryRun) {
+        console.log(`🔍 DRY RUN: Found ${emailIds.length} matching emails`);
+
+        // Fetch minimal details for preview (first 10 only to avoid token bloat)
+        const previewCount = Math.min(emailIds.length, 10);
+        const previewDetails = [];
+
+        for (let i = 0; i < previewCount; i++) {
+          const details = await gmail.users.messages.get({
+            userId: 'me',
+            id: emailIds[i],
+            format: 'metadata',
+            metadataHeaders: ['Subject', 'From', 'Date']
+          });
+
+          const headers = details.data.payload?.headers || [];
+          const getHeader = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
+
+          previewDetails.push({
+            id: emailIds[i],
+            from: getHeader('From'),
+            subject: getHeader('Subject'),
+            date: formatEmailDate(getHeader('Date'))
+          });
+        }
+
+        return JSON.stringify({
+          success: true,
+          dryRun: true,
+          matched: emailIds.length,
+          query: gmailQuery,
+          preview: previewDetails,
+          message: `DRY RUN: Found ${emailIds.length} emails. Showing first ${previewCount}. Set dryRun=false to process them.`,
+          note: emailIds.length > previewCount ? `${emailIds.length - previewCount} more emails match this query` : null
+        }, null, 2);
+      }
+
+      // REAL RUN: Process all matching emails
+      console.log(`⚙️  Processing ${emailIds.length} emails...`);
+      const results = await processUnsubscribeAndArchive(emailIds);
+
+      const summary = [
+        `Processed ${results.total} email(s):`,
+        `✅ Unsubscribed: ${results.unsubscribed.length}`,
+        `⚠️  Unsubscribe failed/unavailable: ${results.unsubscribeFailed.length}`,
+        `📥 Archived: ${results.archived.length}`,
+        results.archiveFailed.length > 0 ? `❌ Archive failed: ${results.archiveFailed.length}` : null
+      ].filter(Boolean).join('\n');
+
+      console.log('\n' + summary);
+
+      return JSON.stringify({
+        success: results.archived.length > 0,
+        query: gmailQuery,
+        total: results.total,
+        unsubscribed: results.unsubscribed.length,
+        unsubscribeFailed: results.unsubscribeFailed.length,
+        archived: results.archived.length,
+        archiveFailed: results.archiveFailed.length,
+        summary: summary
+      }, null, 2);
+    }
+  });
+
+  return [listEmailsTool, readEmailTool, archiveEmailTool, unsubscribeEmailTool, draftReplyTool, unsubscribeAndArchiveByIdsTool, unsubscribeAndArchiveByQueryTool];
 }
 
 async function main() {
-  console.log('🤖 Personal Email Management Agent (LangGraph)');
-  console.log('=====================================\n');
-
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error('❌ Error: ANTHROPIC_API_KEY environment variable is required');
     console.log('Please add your Anthropic API key to the .env file');
     process.exit(1);
   }
 
-  // Initialize Gmail
+  // Initialize Gmail (silent unless there's an error)
   const gmailService = await initializeGmail();
 
   if (!gmailService) {
@@ -1055,252 +1331,130 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('Hi! I\'m your personal email management assistant.');
-  console.log('I can help you with email tasks.\n');
-  console.log('💡 Commands: "quit" (exit)\n');
-
-  // Create LangGraph tools (Gmail + Memory)
+  // Create LangGraph tools (Gmail + Memory + Batched Email)
   const gmailTools = createGmailTools(gmailService);
   const memoryTools = createMemoryTools();
-  const tools = [...gmailTools, ...memoryTools];
+  const batchedEmailTool = createBatchedEmailTool();
 
-  // Initialize Claude model with memory tool beta
+  // Create triage tool (needs access to list_emails, read_email, and gmail service for pagination)
+  const listEmailsTool = gmailTools.find(t => t.name === 'list_emails')!;
+  const readEmailTool = gmailTools.find(t => t.name === 'read_email')!;
+  const triageTool = createTriageTool(listEmailsTool, readEmailTool, gmailService);
+
+  const tools = [...gmailTools, ...memoryTools, batchedEmailTool, triageTool];
+
+  // Initialize Claude model with memory tool beta and prompt caching
   const model = new ChatAnthropic({
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-3-5-sonnet-20241022',
     apiKey: process.env.ANTHROPIC_API_KEY,
     clientOptions: {
       defaultHeaders: {
-        'anthropic-beta': 'context-management-2025-06-27'
+        'anthropic-beta': 'context-management-2025-06-27,prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11'
       }
     }
   });
 
+  // Load user preferences dynamically
+  const preferencesPath = path.join(process.cwd(), 'memories', 'email_preferences.md');
+  let userPreferences = '';
+  if (fs.existsSync(preferencesPath)) {
+    try {
+      userPreferences = fs.readFileSync(preferencesPath, 'utf-8');
+    } catch (error) {
+      console.error('Failed to load email preferences:', error);
+    }
+  }
+
   // System prompt to guide the agent's behavior
-  const systemPrompt = `You are an advanced personal email management assistant for Emily.
+  const systemPrompt = `You are a personal email management assistant.
 
-🎯 **YOUR PRIORITIES (in order):**
-1. **MAIN PRIORITY**: Ensure Emily responds to and takes action on TRULY important emails
-   - Never let Action Required emails slip through, especially recruitment/job search
-   - Make sure critical deadlines and questions are addressed
-   - Present these individually with full context so Emily can make informed decisions
+═══════════════════════════════════════════════════════════════════
+TIER 1: CORE MISSION (HIGHEST PRIORITY)
+═══════════════════════════════════════════════════════════════════
 
-2. **SECOND PRIORITY**: Help Emily achieve inbox zero
-   - Efficiently process non-critical emails in batches
-   - Archive, unsubscribe, or organize to clear the inbox
-   - Move quickly through informational content
+🎯 YOUR PRIORITIES (IN ORDER):
+1. IMPORTANT EMAILS FIRST: Ensure critical emails get attention (friends & family, job search, urgent deadlines, personal questions)
+2. INBOX ZERO SECOND: Efficiently batch-process non-critical emails after important ones are handled
 
-**Remember**: It's better to spend time on one important email than to archive 100 newsletters. Quality over speed for critical emails.
+Remember: Better to spend time on one important email than archive 100 newsletters. Quality over speed for critical emails.
 
-💾 **MEMORY SYSTEM:**
-You have access to a persistent memory system that allows you to remember information across conversations:
+═══════════════════════════════════════════════════════════════════
+TIER 2: CRITICAL TECHNICAL RULES
+═══════════════════════════════════════════════════════════════════
 
-**Memory Operations:**
-- **view_memory**: View memory directory contents or read a specific memory file
-- **create_memory**: Create a new memory file (e.g., "contacts.txt", "preferences.md")
-- **str_replace_memory**: Update existing information by replacing strings
-- **insert_memory**: Insert content at a specific line
-- **delete_memory**: Delete a memory file
-- **rename_memory**: Rename or move a memory file
+⚠️  MANDATORY RULES (NEVER VIOLATE THESE):
 
-**What to Remember:**
-- **Contacts**: Important people Emily emails with, their roles, context about relationships
-- **Preferences**: How Emily prefers to categorize certain types of emails, communication style preferences
-- **Job Search**: Recruiters contacted, companies applied to, interview dates, follow-up needed
-- **Events**: Recurring events Emily attends, venues, organizers
-- **Email Patterns**: Senders Emily always archives, newsletters to unsubscribe from
-- **Response Templates**: Common reply patterns or phrases Emily uses
+1. ANTI-HALLUCINATION: Always cite email_id when presenting emails. Never present emails without source data.
+   - Only use data from pending.json or Gmail API responses
+   - Never invent times, dates, names, or content not in source
+   - If uncertain, call read_email(email_id) to get real content
 
-**Memory Best Practices:**
-1. **Check memory first**: At the start of each session, view memory directory to recall context
-2. **Update as you learn**: When Emily makes decisions or shares preferences, save them to memory
-3. **Organize by topic**: Use descriptive filenames like "job_search.md", "frequent_contacts.txt", "email_preferences.md"
-4. **Keep it current**: Update memory when situations change (e.g., job status, new contacts)
-5. **Focus on actionable info**: Remember things that help you categorize and respond to emails better
+2. PAGINATION: ALWAYS use get_batched_emails() to load emails in small batches
+   - Loading all pending.json causes context overflow and hallucinations
+   - Batch size: 5 for ACTION_REQUIRED, 10-20 for bulk categories
+   - Call get_batched_emails(category, offset, limit) before presenting emails
 
-**Example Memory Usage:**
-- When Emily says "always archive emails from this sender", save it to "email_preferences.md"
-- When drafting replies, check "response_style.txt" to match Emily's tone
-- Before suggesting which emails to prioritize, check "job_search.md" for current priorities
+3. TRIAGE PRECONDITION: ALWAYS check view_memory("triage/pending.json") BEFORE calling triage_inbox
+   - If pending exists: Ask user (continue vs fresh)
+   - If no pending: Proceed with new triage
+   - Never overwrite pending.json without asking
 
-🔧 **Available Gmail Operations:**
-- **list_emails**: Search and filter emails with flexible options
-  - Time ranges: "today", "yesterday", "last week", "last month", or custom (e.g., "7d")
-  - Filters: sender (from), recipient (to), subject keywords, attachments, read/unread status, labels
-  - Examples: "emails from today", "unread emails from last week", "emails with attachments from john@example.com"
+═══════════════════════════════════════════════════════════════════
+TIER 3: USER INTERACTION
+═══════════════════════════════════════════════════════════════════
 
-- **read_email**: Get full content of a specific email by ID
-  - Use after listing emails to read the complete message body
+🎨 CLI OUTPUT FORMATTING:
+- Use ANSI color tags: [red]...[/red], [green]...[/green], [yellow]...[/yellow], [cyan]...[/cyan]
+- NO markdown (**, ##, _italics_) - use colors instead
+- Simple dividers: === or ---
+- Numbered lists (1. 2. 3.) not bullets
 
-- **archive_email**: Archive one or more emails (removes from inbox, keeps in All Mail)
-  - Can archive multiple emails at once by providing an array of email IDs
+📋 MULTIPLE CHOICE PROMPTS:
+ALWAYS present choices as numbered options. Users reply with just "1" or "2".
 
-- **unsubscribe_email**: Automatically unsubscribe from promotional/marketing emails
-  - Parses the List-Unsubscribe header and makes the HTTP request on your behalf
-  - Works with emails that have standard RFC-compliant unsubscribe links
-  - Use this for emails in the "Unsubscribe" category
-  - Note: Not all emails have automated unsubscribe links; some may require manual action
+Example:
+What would you like to process next?
+  1. Summarize Purchases (1 email)
+  2. Archive (3 emails)
+  3. Unsubscribe (1 email)
+Enter 1-3:
 
-- **draft_reply**: Create a draft reply to an email
-  - Automatically handles threading (In-Reply-To, References headers) to keep conversations organized
-  - Prefixes subject with "Re: " if not already present
-  - Saves as draft in Gmail for review before sending
-  - Use this for Action Required emails that need thoughtful responses
-  - Emily can review, edit, and send the draft from Gmail
+🎬 STARTUP BEHAVIOR:
+On first interaction, check view_memory("triage/pending.json"):
+- If pending exists: Mention count, suggest processing
+- If no pending: Suggest triaging inbox
+- Keep welcome brief (2-3 lines), end with numbered choices
 
-- **unsubscribe_and_archive**: ⚡ BATCH OPERATION - Sweep away junk newsletters efficiently
-  - Attempts to unsubscribe from multiple emails, then archives them all
-  - Optimistic: continues even if unsubscribe fails for some emails
-  - Perfect for processing "Unsubscribe" category in bulk
-  - Saves tokens by combining two operations into one
-  - Use this instead of calling unsubscribe_email and archive_email separately for multiple emails
+═══════════════════════════════════════════════════════════════════
+TIER 4: WORKFLOWS
+═══════════════════════════════════════════════════════════════════
 
-📋 **Email Classification System:**
-When asked to classify or organize emails, use these categories:
+💾 MEMORY SYSTEM:
+Check memories/ at startup. Remember contacts, preferences, job search status, email patterns.
+- view_memory: View directory or read file
+- create_memory / str_replace_memory: Update preferences
+- Check email_preferences.md for user-specific categorization rules
 
-**1. Action Required**
-Criteria:
-- Personal emails from known contacts (not automated)
-- Recruitment/job search correspondence (HIGHEST PRIORITY)
-- Direct questions or calls for volunteers/action
-- Calendar invitations for job interviews
-- Boston-area LGBTQ, design, or product management meetup invitations
-- Critical service alerts (order issues, payment failures, service outages)
+🔄 TRIAGE WORKFLOW:
+1. Check view_memory("triage/pending.json") first
+2. If pending exists: Ask user (continue or fresh)
+3. If no pending: Run triage_inbox(days=1)
+4. Process by priority: ACTION_REQUIRED → EVENTS → PURCHASES → INFORM → UNSUBSCRIBE → ARCHIVE
 
-Meta-summary format:
-Subject: <email subject>
-People: <list all participants with emails>
-Synopsis: <one-sentence summary of thread purpose>
-Analysis: <identify the single most important question/action required, sender's sentiment (casual/urgent/formal), deadline if any>
+📧 EMAIL PROCESSING:
+- Use get_batched_emails(category, offset, limit) to load emails in batches
+- ACTION_REQUIRED: Load 5 at a time, handle individually
+- Other categories: Load 10-20, batch process
+- Always cite email_id when presenting emails
+- Confirm actions: "✅ Archived 3 emails"
 
-**2. Summarize & Inform**
-Criteria:
-- Newsletters, digests, articles (NYT, Substack, thought leaders)
-- Content about parenting, product management, or LGBTQ topics
+═══════════════════════════════════════════════════════════════════
+TIER 5: USER-SPECIFIC PREFERENCES
+═══════════════════════════════════════════════════════════════════
 
-Meta-summary format:
-Source: <publication or sender name>
-Subject: <email subject>
-Key Insights: <2-4 sentence synopsis of main points and key takeaway>
+${userPreferences}
 
-**3. Summarize Events**
-Criteria:
-- Live events, concerts, workshops
-- Eventbrite, Songkick event notifications
-- LGBTQ or Boston Sex Positive event invitations
-- Personal calendar invitations from "Heather"
-- EXCLUDE job interview invitations
-
-Meta-summary format:
-Event: <event name>
-From: <invitation sender>
-What: <one-sentence event description>
-Where: <venue, address, location>
-When: <full date and time>
-
-**4. Summarize Purchases**
-Criteria:
-- Order confirmations
-- Shipping notifications and delivery updates
-- Digital receipts
-
-Meta-summary format:
-Vendor: <store name>
-Subject: <email subject>
-Update: "You purchased [Item(s)] for [Price]." OR "Your order containing [Item(s)] has shipped." OR "Your order will be delivered on [Date]."
-
-**5. Unsubscribe**
-Criteria:
-- Marketing emails trying to sell something
-- Promotional content from services not actively/regularly used
-
-Meta-summary format:
-Sender: <business or service name>
-Recommendation: <one-sentence justification, e.g., "This is a promotional mailing list for a service you no longer use.">
-
-**6. Immediate Archive**
-Criteria:
-- Automated informational notifications (not critical)
-- Resolved customer support threads
-- Promotional emails from services Emily uses but this specific email isn't actionable
-- General corporate announcements from services she uses
-
-Meta-summary: "This email is informational and does not require a specific action or summary. It can be safely archived."
-
-**7. Other**
-Criteria:
-- Only use when all other categories have been exhausted
-
-**WORKFLOW APPROACH:**
-Work iteratively through emails in chunks or categories, ALWAYS starting with Action Required emails:
-
-**Suggested Order:**
-1. Action Required emails (handle individually, most important)
-2. Summarize Events (time-sensitive, may need responses)
-3. Summarize Purchases (quick review for any issues)
-4. Summarize & Inform (batch archive)
-5. Unsubscribe (batch cleanup)
-6. Immediate Archive (batch archive)
-7. Other (review case-by-case)
-
-Examples:
-- "Let's start with Action Required emails first"
-- "Now let's quickly process the Summarize Purchases emails"
-- "Let's review emails from the last hour, starting with anything important"
-
-**BATCH PROCESSING (for non-important emails):**
-Group similar emails and present them with options. Format:
-
-**[Category Name]** (X emails)
-<Summarized list with email IDs>
-
-**Options:**
-1. Archive all
-2. Read specific email(s) (provide number/ID)
-3. Skip for now
-4. Unsubscribe and archive all (use unsubscribe_and_archive tool for efficiency)
-
-Example: "Here are 10 Summarize & Inform emails from this week. [list]. Options: 1) Archive all, 2) Read specific email(s), 3) Skip for now, 4) Unsubscribe from sender(s)"
-
-**INDIVIDUAL HANDLING (for Action Required emails):**
-Present each important email individually with:
-
-**[Email Subject]**
-<Meta-summary with full details>
-
-**Options:**
-1. Read full email
-2. Draft reply (if response needed)
-3. Archive
-4. Skip for now
-5. Next email
-
-When drafting replies:
-- Offer to create a draft for Action Required emails that need responses
-- Suggest thoughtful reply content based on the email context
-- Always save as draft so Emily can review before sending
-
-**IMPORTANT GUIDELINES:**
-1. **ALWAYS start with Action Required emails** - never skip to other categories first
-2. For Action Required emails: handle individually, provide full context, highlight deadlines and required actions
-3. Prioritize recruitment/job search emails above all else - these are career-critical
-4. Be proactive - actually perform actions, don't just explain what could be done
-5. When listing emails, always mention the email IDs so users can reference them
-6. Work in manageable chunks (5-10 emails at a time, or one category at a time)
-7. For non-Action Required categories, prefer batch processing with summarized lists
-8. Always provide the appropriate meta-summary format for each classification
-9. Use consistent numbered options - don't change the order of action choices
-10. If an email body is very long, summarize the key points
-11. Always confirm successful operations (e.g., "✅ Archived 3 emails")
-12. After completing a chunk/category, ask "What would you like to review next?" or suggest the next logical category
-13. **Don't rush through important emails just to achieve inbox zero** - thoroughness matters for critical emails
-
-**RESPONSE STYLE:**
-- Be concise and helpful
-- Use the tools to provide actual results, not just descriptions
-- Maintain context across the conversation
-- When classifying, present results grouped by category
-- Present options as numbered lists for easy selection
-- Guide the user through their inbox systematically`;
+`;
 
   // Create ReAct agent - LangGraph handles conversation history automatically!
   const agent = createReactAgent({
@@ -1312,9 +1466,43 @@ When drafting replies:
   // Conversation state managed by LangGraph
   const conversationMessages: any[] = [];
 
+  // Fast startup: Check for pending emails directly without LLM call
+  const pendingPath = path.join(process.cwd(), 'memories', 'triage', 'pending.json');
+  let hasPending = false;
+  let pendingCount = 0;
+
+  if (fs.existsSync(pendingPath)) {
+    try {
+      const pendingData = JSON.parse(fs.readFileSync(pendingPath, 'utf-8'));
+      pendingCount = pendingData.total_emails || 0;
+      hasPending = pendingCount > 0;
+    } catch (error) {
+      // Ignore parse errors
+    }
+  }
+
+  // Show instant welcome message
+  console.log('\n' + applyColors('[cyan]Welcome back![/cyan]') + '\n');
+
+  if (hasPending) {
+    console.log(applyColors(`You have [yellow]${pendingCount} pending emails[/yellow] from a previous triage.\n`));
+    console.log('What would you like to do?');
+    console.log('  1. Process pending emails (recommended)');
+    console.log('  2. Triage new emails from today');
+    console.log('  3. Something else');
+  } else {
+    console.log('No pending triaged emails found.\n');
+    console.log('What would you like to do?');
+    console.log('  1. Triage inbox from today (recommended)');
+    console.log('  2. Triage inbox from a different timeframe');
+    console.log('  3. Check specific emails manually');
+  }
+
+  console.log('\n' + '─'.repeat(50) + '\n');
+
   while (true) {
     try {
-      const userInput = await askQuestion('💬 What would you like me to help you with? (type "quit" to exit): ');
+      const userInput = await askQuestion('> ');
 
       if (userInput.toLowerCase() === 'quit' || userInput.toLowerCase() === 'exit') {
         console.log('\n👋 Goodbye!');
@@ -1336,12 +1524,56 @@ When drafting replies:
       });
 
       // LangGraph returns the full updated message history
+      // Trim history intelligently to prevent context overflow while keeping tool_use/tool_result pairs intact
       conversationMessages.length = 0;
-      conversationMessages.push(...result.messages);
 
-      // Extract and display the final response
+      // Find a safe cutoff point that doesn't separate tool_use from tool_result
+      // Strategy: Keep the most recent complete conversation turns
+      const MAX_TURNS_TO_KEEP = 2; // Keep last 2 complete turns (user input + agent response with tools)
+
+      let trimmedMessages: any[];
+      if (result.messages.length <= 10) {
+        // If history is small enough, keep everything
+        trimmedMessages = result.messages;
+      } else {
+        // Work backwards to find complete turns
+        // A turn is: HumanMessage -> AIMessage (with possible tool_use) -> ToolMessages -> AIMessage
+        const messages = result.messages;
+        let turnsKept = 0;
+        let cutoffIndex = messages.length;
+
+        // Scan backwards
+        for (let i = messages.length - 1; i >= 0 && turnsKept < MAX_TURNS_TO_KEEP; i--) {
+          const msg = messages[i];
+
+          // Look for HumanMessage as turn boundary
+          if (msg._getType() === 'human') {
+            turnsKept++;
+            if (turnsKept >= MAX_TURNS_TO_KEEP) {
+              cutoffIndex = i;
+              break;
+            }
+          }
+        }
+
+        // Ensure we keep at least the last message
+        if (cutoffIndex >= messages.length - 1) {
+          cutoffIndex = Math.max(0, messages.length - 10);
+        }
+
+        trimmedMessages = messages.slice(cutoffIndex);
+      }
+
+      conversationMessages.push(...trimmedMessages);
+
+      // Log if we're managing history (for debugging)
+      if (result.messages.length > trimmedMessages.length) {
+        console.log(`\n[Note: Conversation history trimmed to last ${trimmedMessages.length} messages (${MAX_TURNS_TO_KEEP} turns) to manage context]\n`);
+      }
+
+      // Extract and display the final response with colors applied
       const lastMessage = result.messages[result.messages.length - 1];
-      console.log('🤖 Assistant:', lastMessage.content);
+      console.log(applyColors(lastMessage.content));
 
       console.log('\n' + '─'.repeat(50) + '\n');
 

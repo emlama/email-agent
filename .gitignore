@@ -34,3 +34,8 @@ Thumbs.db
 logs/
 *.log
 npm-debug.log*
+
+# Project management files
+EMAIL_CLASSIFICATION_SYSTEM.md
+TRIAGE_PLAN.md
+CLAUDE.md
